@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="learning_fact_layer" type="id" />
+    <item name="learning_conversation" type="id" />
+    <item name="learning_prompt_panel" type="id" />
+    <item name="learning_questions" type="id" />
+    <item name="learning_input" type="id" />
+    <item name="learning_back" type="id" />
+    <item name="learning_attachment" type="id" />
+    <item name="learning_history_back" type="id" />
+    <item name="learning_session_edit" type="id" />
+    <item name="history_back_button" type="id" />
+    <item name="learning_send_stop" type="id" />
+    <item name="learning_chart" type="id" />
+</resources>

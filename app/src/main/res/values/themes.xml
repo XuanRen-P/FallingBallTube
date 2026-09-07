@@ -1,0 +1,24 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.FallingBallTube" parent="Theme.MaterialComponents.Light.NoActionBar">
+        <item name="colorPrimary">@color/accent</item>
+        <item name="colorPrimaryVariant">@color/accent</item>
+        <item name="colorOnPrimary">@color/white</item>
+        <item name="colorSecondary">@color/search</item>
+        <item name="colorOnSecondary">@color/white</item>
+        <item name="colorSurface">@color/surface</item>
+        <item name="colorOnSurface">@color/text_primary</item>
+        <item name="colorOnSurfaceVariant">@color/text_secondary</item>
+        <item name="colorError">@color/error</item>
+        <item name="colorOnError">@color/white</item>
+        <item name="android:statusBarColor">@color/page_background</item>
+        <item name="android:navigationBarColor">@color/page_background</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowBackground">@color/page_background</item>
+    </style>
+
+    <style name="Theme.FallingBallTube.Camera" parent="Theme.FallingBallTube">
+        <item name="colorPrimary">@color/camera_accent</item>
+        <item name="colorPrimaryVariant">@color/camera_accent</item>
+    </style>
+</resources>

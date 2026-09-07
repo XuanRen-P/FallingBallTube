@@ -1,0 +1,167 @@
+{
+  "contract_version": "tinyheatmapnet-android-fp32-20260903-v2",
+  "parent": {
+    "file": "tinyheatmapnet_final.onnx",
+    "sha256": "4c21973c321a3f77153453cb786fc15ee6fef3d93d416a1c5323b7dae6058fb6",
+    "precision": "FP32",
+    "input_shape": [
+      1,
+      5,
+      1024,
+      152
+    ],
+    "output_shapes": [
+      [
+        1,
+        1,
+        512,
+        76
+      ],
+      [
+        1,
+        2,
+        512,
+        76
+      ]
+    ],
+    "metadata": {
+      "model": "TinyHeatmapNet",
+      "preprocess": "signed_local_contrast",
+      "model_variant": "groupnorm",
+      "architecture": "multiscale",
+      "input_shape": "1,5,1024,152",
+      "output_shapes": "1,1,512,76;1,2,512,76",
+      "output_stride": "2",
+      "parent_checkpoint_sha256": "1dca1bb72c5c15f034230e6007303444a84b1d37e141b575d505425506f59c08"
+    },
+    "pytorch_onnx_parity": {
+      "provider": "CPUExecutionProvider",
+      "maximum_absolute_errors": [
+        5.1975250244140625e-05,
+        3.993511199951172e-06
+      ],
+      "tolerance": 0.0001
+    },
+    "ncnn": {
+      "param_file": "tinyheatmapnet_final.ncnn.param",
+      "param_sha256": "2c633fe56d4ad16517faacee2d27fa96ff68cf90e00d8389ac683b4dc1c96404",
+      "param_bytes": 4500,
+      "bin_file": "tinyheatmapnet_final.ncnn.bin",
+      "bin_sha256": "e42f30eebc2bb6f027780004273f3fbc0f5b9b8f817bb70101c18559e9b94357",
+      "bin_bytes": 69320,
+      "conversion": "onnx_to_ncnn_pnnx",
+      "pnnx_version": "20260526",
+      "compute_path": "NCNN Vulkan GPU with ORT CPU fallback",
+      "input_shape": [
+        1,
+        5,
+        1024,
+        152
+      ],
+      "output_shapes": [
+        [
+          1,
+          1,
+          512,
+          76
+        ],
+        [
+          1,
+          2,
+          512,
+          76
+        ]
+      ],
+      "parity": {
+        "reference": "onnxruntime CPU",
+        "random_input_count": 5,
+        "maximum_absolute_errors": [
+          3.814697265625e-05,
+          2.4437904357910156e-06
+        ],
+        "tolerance": 0.0001
+      }
+    }
+  },
+  "reranker": {
+    "file": "candidate_reranker_final.onnx",
+    "sha256": "6bb0b832ae92d80d2583a00ed4abaad657de8abf51eeb9255da80367a517998d",
+    "input_shapes": [
+      [
+        1,
+        9,
+        17,
+        17
+      ],
+      [
+        1
+      ]
+    ],
+    "output_shape": [
+      1
+    ],
+    "metadata": {
+      "model": "CandidateReranker",
+      "preprocess": "causal_aligned_motion_contrast",
+      "temporal_alignment": "source_geometry_homography",
+      "input_shapes": "patches:1,9,17,17;base_scores:1",
+      "output_shape": "1",
+      "top_k": "5",
+      "nms_kernel": "5",
+      "patch_size": "17",
+      "frozen_threshold": "0.08",
+      "reranker_checkpoint_sha256": "c5ee07e16b98f1a1169eb42ab45e9a448a6593385447fed58e2fd3d931c7732f"
+    },
+    "pytorch_onnx_parity": {
+      "provider": "CPUExecutionProvider",
+      "maximum_absolute_errors": [
+        0.0
+      ],
+      "tolerance": 0.0001
+    },
+    "batched": {
+      "file": "candidate_reranker_batched.onnx",
+      "sha256": "e783d6a7896770637396da3dbc659a739c2aff8dfb288beca9bbf638dd6d43e1",
+      "bytes": 51257,
+      "input_shapes": [
+        [
+          5,
+          9,
+          17,
+          17
+        ],
+        [
+          5
+        ]
+      ],
+      "output_shape": [
+        5
+      ],
+      "batch_size": 5,
+      "architecture": "candidate_reranker_cnn_batched",
+      "checkpoint_sha256": "c5ee07e16b98f1a1169eb42ab45e9a448a6593385447fed58e2fd3d931c7732f",
+      "parity": {
+        "reference": "PyTorch CandidateReranker",
+        "provider": "CPUExecutionProvider",
+        "maximum_absolute_error": 9.5367431640625e-07,
+        "tolerance": 0.0001
+      }
+    }
+  },
+  "decoder": {
+    "top_k": 5,
+    "nms_kernel": 5,
+    "patch_size": 17,
+    "candidate_threshold": 0.08,
+    "candidate_transition_weight": 0.1,
+    "presence_transition_penalty": 2.0,
+    "max_frame_gap": 20,
+    "max_motion_residual": 4.0,
+    "horizontal_velocity_scale": 1.0,
+    "vertical_velocity_scale": 4.0,
+    "motion_lags": [
+      1,
+      3
+    ]
+  }
+}

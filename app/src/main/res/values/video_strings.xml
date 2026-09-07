@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="video_title">视频分析</string>
+    <string name="video_import">导入视频</string>
+    <string name="video_none_selected">尚未选择视频</string>
+    <string name="video_start_seconds">起点（秒）</string>
+    <string name="video_end_seconds">终点（秒）</string>
+    <string name="video_parameters">实验参数</string>
+    <string name="video_normal_speed">已确认视频为原速，未慢放或变速</string>
+    <string name="video_start_analysis">开始离线分析</string>
+    <string name="video_retry">重新分析</string>
+    <string name="video_open_result">查看分析结果</string>
+    <string name="video_notification_channel">离线视频分析进度</string>
+    <string name="video_phase_initializing">正在准备分析</string>
+    <string name="video_phase_calibrating">正在识别试管与标定刻度</string>
+    <string name="video_phase_analyzing">正在逐帧检测小球</string>
+    <string name="video_phase_finalizing">正在计算轨迹与测量结果</string>
+    <string name="video_phase_saving">正在保存测量记录</string>
+    <string name="video_queued">等待开始分析</string>
+    <string name="video_restarting">任务已恢复，正在从片段起点重新分析</string>
+    <string name="video_complete">分析完成，记录已保存</string>
+    <string name="video_cancelled">分析已取消</string>
+    <string name="video_analysis_failed">视频分析失败</string>
+    <string name="video_start_failed">无法启动分析任务</string>
+    <string name="video_load_failed">无法读取视频</string>
+    <string name="video_permission_failed">无法保留视频读取权限，请从设备文件中重新选择视频</string>
+    <string name="video_preview_failed">此视频无法预览，分析时将检查解码支持情况</string>
+    <string name="video_invalid_start">请输入片段内的有效起点</string>
+    <string name="video_invalid_end">终点须晚于起点且不超出视频时长</string>
+    <string name="video_format">%1$d × %2$d · %3$s · %4$s</string>
+    <string name="video_progress">已处理 %1$s · %2$d 帧 · 小球检测 %3$d 帧 · %4$d%%</string>
+    <string name="video_processing_speed">处理速度 %1$.1f 帧/秒</string>
+    <string name="video_npu_active"> · NPU 加速</string>
+    <string name="video_parameter_summary">刻度间距 %1$s mm · 液体 %2$s · 小球 %3$s</string>
+    <string name="video_unset">未填写</string>
+</resources>

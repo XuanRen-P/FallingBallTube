@@ -1,0 +1,175 @@
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/camera_background"
+    tools:context="com.cupet.fallingball.MainActivity">
+
+    <!-- Camera preview and overlays share the same space. -->
+    <FrameLayout
+        android:id="@+id/previewContainer"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent">
+
+        <androidx.camera.view.PreviewView
+            android:id="@+id/previewView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            app:implementationMode="compatible"
+            app:scaleType="fillCenter" />
+
+        <!--
+          OverlayView MUST be a sibling of PreviewView, never its child:
+          CameraX's PreviewViewImplementation calls parent.removeAllViews() when it
+          attaches the Surface/TextureView, which silently deletes any child overlay.
+          Both custom overlays are siblings after the preview view, so CameraX cannot
+          remove them. OverlayView draws detections first; LevelIndicatorView is topmost.
+        -->
+        <com.cupet.fallingball.ui.OverlayView
+            android:id="@+id/overlayView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clickable="false"
+            android:focusable="false"
+            android:importantForAccessibility="no" />
+
+        <com.cupet.fallingball.ui.LevelIndicatorView
+            android:id="@+id/levelIndicator"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clickable="false"
+            android:focusable="false"
+            android:importantForAccessibility="no" />
+
+    </FrameLayout>
+
+    <!-- Top info panel -->
+    <LinearLayout
+        android:id="@+id/topPanel"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_margin="12dp"
+        android:background="@drawable/bg_panel"
+        android:orientation="vertical"
+        android:padding="12dp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent">
+
+        <TextView
+            android:id="@+id/statusText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/status_searching"
+            android:textColor="@color/camera_text_primary"
+            android:textSize="15sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/metaText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:ellipsize="end"
+            android:maxLines="2"
+            android:minLines="2"
+            android:textColor="@color/camera_accent"
+            android:textSize="12sp"
+            tools:text="1280x720 30fps" />
+    </LinearLayout>
+
+    <!-- Bottom control panel: measurement controls on top, camera controls below -->
+    <LinearLayout
+        android:id="@+id/bottomPanel"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_margin="12dp"
+        android:background="@drawable/bg_panel"
+        android:orientation="vertical"
+        android:padding="10dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
+
+        <com.cupet.fallingball.ui.CameraOpticsView
+            android:id="@+id/cameraOpticsView"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="4dp" />
+
+        <!-- Row 1: the measurement itself -->
+        <LinearLayout
+            android:id="@+id/measureRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnTrack"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="6dp"
+                android:layout_weight="1"
+                android:text="@string/btn_start_track"
+                android:textColor="@color/camera_on_accent"
+                app:backgroundTint="@color/camera_accent" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnConfig"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/btn_config"
+                android:textColor="@color/camera_text_primary"
+                app:strokeColor="@color/camera_secondary" />
+        </LinearLayout>
+
+        <!-- Row 2: relock stays fixed at left; history occupies the second action slot. -->
+        <LinearLayout
+            android:id="@+id/cameraRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnRelock"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="6dp"
+            android:layout_weight="1"
+            android:text="@string/btn_relock"
+            android:textColor="@color/camera_text_primary"
+            app:strokeColor="@color/camera_accent" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnVideoAnalysis"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="6dp"
+            android:text="@string/btn_video_analysis"
+            android:textColor="@color/camera_text_primary"
+            app:strokeColor="@color/camera_secondary" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnHistory"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/btn_history"
+            android:textColor="@color/camera_text_primary"
+            app:strokeColor="@color/camera_secondary" />
+        </LinearLayout>
+
+    </LinearLayout>
+
+</androidx.constraintlayout.widget.ConstraintLayout>

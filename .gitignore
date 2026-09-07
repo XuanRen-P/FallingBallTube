@@ -1,0 +1,50 @@
+# Machine-local configuration, credentials, and signing material.
+/local.properties
+/.secrets/
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+key.properties
+
+# IDE, Gradle, native build, and packaged app outputs.
+/.idea/
+*.iml
+.gradle/
+/.gradle-user/
+/.kotlin/
+**/build/
+.cxx/
+.externalNativeBuild/
+*.apk
+*.aab
+*.ap_
+*.dex
+.DS_Store
+
+# QNN SDK is supplied locally, outside the public source repository.
+/app/src/main/cpp/third_party/qnn/
+/app/src/main/jniLibs/**/libQnn*.so
+
+# This repository publishes the Android app only.
+/dev_tools/
+/tools/
+/promo/
+/runs/
+/captures/
+/generated-images/
+/.device-validation/
+/测试视频/
+/已过时内容/
+/Ultralytics/
+/app/src/test/
+/app/src/androidTest/
+/app/src/debug/
+/*.cmd
+/*.zip
+/*.pt
+/*.onnx
+*.py[cod]
+__pycache__/
+.pytest_cache/

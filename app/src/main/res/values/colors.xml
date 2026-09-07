@@ -1,0 +1,24 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="overlay_bg">#99000000</color>
+    <!-- Light appearance tokens: surfaces and foregrounds are intentionally designed as a pair. -->
+    <color name="accent">#FF006B52</color>
+    <color name="accent_dim">#FFC8F2E3</color>
+    <color name="warning">#FF8A5200</color>
+    <color name="search">#FF245B9E</color>
+    <color name="page_background">#FFF5F7F8</color>
+    <color name="surface">#FFFFFFFF</color>
+    <color name="text_primary">#FF18252B</color>
+    <color name="text_secondary">#FF4B5B63</color>
+    <color name="error">#FFB3261E</color>
+
+    <!-- Camera preview keeps its original dark overlay language, isolated from light pages. -->
+    <color name="camera_background">#FF000000</color>
+    <color name="camera_panel">#CC101820</color>
+    <color name="camera_text_primary">#FFFFFFFF</color>
+    <color name="camera_accent">#FF00E5A8</color>
+    <color name="camera_secondary">#FF64B5F6</color>
+    <color name="camera_on_accent">#FF000000</color>
+</resources>

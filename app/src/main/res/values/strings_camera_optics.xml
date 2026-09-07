@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="camera_optics_auto">自动对焦</string>
+    <string name="camera_optics_manual">手动对焦</string>
+    <string name="camera_optics_fixed">固定焦点</string>
+    <string name="camera_optics_near">近</string>
+    <string name="camera_optics_far">远</string>
+    <string name="camera_optics_select">切换相机</string>
+    <string name="camera_optics_back">后置</string>
+    <string name="camera_optics_front">前置</string>
+    <string name="camera_optics_zoom">变焦</string>
+    <string name="camera_optics_focus_failed">对焦设置失败，正在恢复镜头状态</string>
+    <string name="camera_optics_zoom_failed">变焦设置失败，已恢复当前倍率</string>
+    <string name="camera_optics_switch_failed">无法使用此相机，请选择其他镜头</string>
+</resources>

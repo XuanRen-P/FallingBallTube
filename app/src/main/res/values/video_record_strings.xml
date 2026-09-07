@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="history_source_unknown">来源未记录</string>
+    <string name="history_source_live">实时测量</string>
+    <string name="history_source_video">视频分析</string>
+    <string name="history_video_frame_rate">%1$.3f fps</string>
+    <string name="history_video_frame_rate_unknown">帧率未知</string>
+    <string name="history_video_source_details">%1$s\n原视频 %2$d × %3$d · 旋转 %4$d° · %5$s\n全长 %6$.3f s · 片段 %7$.3f–%8$.3f s\n解码 %9$d 帧 · 处理 %10$d 帧 · 检测 %11$d 帧</string>
+</resources>

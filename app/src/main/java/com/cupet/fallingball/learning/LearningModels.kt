@@ -171,6 +171,8 @@ data class LearningMessage(
     val text: String,
     /** The model's streamed reasoning, kept separate so it can be collapsed in the UI. */
     val reasoning: String = "",
+    /** User-facing reason persisted when this message ends in [LearningMessageState.ERROR]. */
+    val failureReason: String = "",
     /** Display-only attachment metadata; binary content is sent once and never stored here. */
     val attachmentNames: List<String> = emptyList(),
     /** Stable ownership key shared by the user message, assistant message, and tool actions. */

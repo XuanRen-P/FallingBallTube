@@ -509,6 +509,7 @@ class LearningStore(private val root: File) {
     private fun messageJson(value: LearningMessage) = JSONObject()
         .put("id", value.id).put("role", value.role.name).put("text", value.text)
         .put("reasoning", value.reasoning)
+        .put("failure_reason", value.failureReason)
         .put("attachments", JSONArray(value.attachmentNames))
         .put("turn_id", value.turnId)
         .put("created_at", value.createdAtEpochMs).put("state", value.state.name)
@@ -518,6 +519,7 @@ class LearningStore(private val root: File) {
         role = LearningMessageRole.valueOf(value.getString("role")),
         text = value.getString("text"),
         reasoning = value.optString("reasoning"),
+        failureReason = value.optString("failure_reason"),
         attachmentNames = value.optJSONArray("attachments")?.strings().orEmpty(),
         turnId = value.optString("turn_id"),
         createdAtEpochMs = value.getLong("created_at"),

@@ -1,6 +1,7 @@
 package com.cupet.fallingball.vision
 
 import android.content.Context
+import android.os.Build
 import android.util.Log
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -74,15 +75,46 @@ internal class QnnContextTinyHeatmapParentBackend private constructor(
     }
 
     companion object {
-        internal const val CONTEXT_ASSET = "tinyheatmapnet_sep_qnn_context.bin"
-        internal const val INPUT_FLOATS = 5 * 1024 * 152
+        /**
+         * AI Hub `precompiled_qnn_onnx` outputs for the 9-channel causal parent, one per
+         * Hexagon arch.  A context binary is bound to a single HTP arch: the v75 binary
+         * fails to load on v73 (`loadRemoteSymbols err 4000`), so the asset has to be
+         * chosen from the SoC before the file is touched.
+         */
+        internal const val V75_CONTEXT_ASSET = "tinyheatmapnet_causal9_heads_qnn_context.bin"
+        internal const val V73_CONTEXT_ASSET = "tinyheatmapnet_causal9_heads_qnn_context_v73.bin"
+        internal const val V69_CONTEXT_ASSET = "tinyheatmapnet_causal9_heads_qnn_context_v69.bin"
+        internal const val V79_CONTEXT_ASSET = "tinyheatmapnet_causal9_heads_qnn_context_v79.bin"
+        internal const val INPUT_FLOATS = 9 * 1024 * 152
         internal const val HEATMAP_FLOATS = 512 * 76
         internal const val OFFSET_FLOATS = 2 * 512 * 76
+
+        /**
+         * Context binary for [socModel].
+         *
+         * HTP arch by SoC: SM8450 (8 Gen 1) and SM8475 (8+ Gen 1) are v69, SM8550 (8 Gen 2)
+         * and SM8635 (8s Gen 3) are v73, SM8650 (8 Gen 3, including the Galaxy `-AC` SKU) is
+         * v75, SM8750 (8 Elite, including the Galaxy `-AC` SKU) is v79.  Anything else —
+         * for example SM8350/888 or SM8250/865, which are v68 — keeps the historical v75
+         * attempt and therefore falls back to CPU exactly as before.
+         */
+        internal fun contextAssetFor(socModel: String?): String = when {
+            socModel == null -> V75_CONTEXT_ASSET
+            socModel.startsWith("SM8450") || socModel.startsWith("SM8475") -> V69_CONTEXT_ASSET
+            socModel.startsWith("SM8550") || socModel.startsWith("SM8635") -> V73_CONTEXT_ASSET
+            socModel.startsWith("SM8750") -> V79_CONTEXT_ASSET
+            else -> V75_CONTEXT_ASSET
+        }
+
+        private fun socModel(): String? =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) Build.SOC_MODEL else null
 
         /** Returns `null` when the HTP context cannot be created on this device. */
         fun create(context: Context): QnnContextTinyHeatmapParentBackend? =
             runCatching {
-                val binary = context.assets.open(CONTEXT_ASSET).use { it.readBytes() }
+                val asset = contextAssetFor(socModel())
+                Log.i(TAG, "QNN HTP context asset=$asset soc=${socModel() ?: "unknown"}")
+                val binary = context.assets.open(asset).use { it.readBytes() }
                 val htpPath = "${context.applicationInfo.nativeLibraryDir}/libQnnHtp.so"
                 val backend = create { QnnParentRuntime.acquire(htpPath, binary) }
                 if (backend == null) {

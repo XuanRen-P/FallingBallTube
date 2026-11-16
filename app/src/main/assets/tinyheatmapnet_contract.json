@@ -1,12 +1,12 @@
 {
-  "contract_version": "tinyheatmapnet-android-fp32-20260903-v2",
+  "contract_version": "tinyheatmapnet-android-causal9-heads-20260913-v1",
   "parent": {
-    "file": "tinyheatmapnet_final.onnx",
-    "sha256": "4c21973c321a3f77153453cb786fc15ee6fef3d93d416a1c5323b7dae6058fb6",
+    "file": "tinyheatmapnet_causal9_heads.onnx",
+    "sha256": "a1928580083d4555dfb72f5168c4d1eb3a682616ddbbf77829a937f8ef5914c4",
     "precision": "FP32",
     "input_shape": [
       1,
-      5,
+      9,
       1024,
       152
     ],
@@ -26,21 +26,29 @@
     ],
     "metadata": {
       "model": "TinyHeatmapNet",
-      "preprocess": "signed_local_contrast",
-      "model_variant": "groupnorm",
+      "preprocess": "causal_aligned_motion_contrast",
+      "temporal_lags": "1;3",
+      "temporal_alignment": "source_geometry_homography",
+      "model_variant": "hybrid",
       "architecture": "multiscale",
-      "input_shape": "1,5,1024,152",
+      "activation": "silu",
+      "input_shape": "1,9,1024,152",
       "output_shapes": "1,1,512,76;1,2,512,76",
       "output_stride": "2",
-      "parent_checkpoint_sha256": "1dca1bb72c5c15f034230e6007303444a84b1d37e141b575d505425506f59c08"
+      "parent_checkpoint_sha256": "d600da35830263fed99ea2ed696db4eb12d2ebbab54cee8b95bb959af8678ed5",
+      "groupnorm_blocks": "0",
+      "groupnorm_sites": "12,13",
+      "normalization_note": "hybrid: only the two head normalizations stay per-sample GroupNorm; the other eleven fold into their convolutions. Front-end GroupNorm is harmful, not neutral -- it makes downstream BatchNorm running statistics inconsistent with the activation scale they were calibrated on."
     },
     "pytorch_onnx_parity": {
       "provider": "CPUExecutionProvider",
       "maximum_absolute_errors": [
-        5.1975250244140625e-05,
-        3.993511199951172e-06
+        0.00015544891357421875,
+        2.1755695343017578e-05
       ],
-      "tolerance": 0.0001
+      "sample_count": 8,
+      "note": "maximum absolute error over real preprocessed causal samples; the 9-channel causal graph drifts slightly more than the 5-channel one",
+      "tolerance": 0.005
     },
     "ncnn": {
       "param_file": "tinyheatmapnet_final.ncnn.param",
@@ -80,6 +88,87 @@
           2.4437904357910156e-06
         ],
         "tolerance": 0.0001
+      },
+      "note": "Shipped ncnn asset is 5-channel; the parent is now 9-channel, so the NCNN backend declines at construction and the chain is QNN HTP -> ORT CPU."
+    },
+    "qnn": {
+      "context_binary_file": "tinyheatmapnet_causal9_heads_qnn_context.bin",
+      "context_binary_sha256": "177b4186f6ba1a50c30a04dbcb28adf20d25b645dbbb7535a0679dc947b869d3",
+      "context_binary_bytes": 643104,
+      "target": "QNN HTP v75 FP16 (Snapdragon 8 Gen 3 / SM8650)",
+      "ai_hub_target_model": "mn7lx1koj",
+      "graph_variant": "average_pool_to_depthwise_conv",
+      "layer_placement": "56/56 on NPU, 0 on CPU",
+      "median_inference_ms": 2.465,
+      "decode_gate": {
+        "samples": 8,
+        "presence_mismatch": 0,
+        "argmax_cell_mismatch": 0,
+        "center_error_max_px": 0.007713,
+        "tolerance_px": 10.0,
+        "passed": true
+      },
+      "speedup_vs_groupnorm_parent": 7.55,
+      "groupnorm_parent_median_ms": 18.615,
+      "note": "Measured on AI Hub, Samsung Galaxy S24 (Family) / SM8650 / Hexagon v75, FLOAT16, all layers on NPU. 2026-11-15: recompiled from the exact AveragePool->depthwise Conv rewrite (3x3 and 7x7 box filters become constant-weight depthwise convolutions; ONNX parity 3.8e-06) which took the artefact from 3.704 ms to 2.465 ms with the decode gate still at 0.0077 px. The shipped ONNX is deliberately left as the original graph: it backs the CPU fallback, and the two artefacts are numerically equivalent.",
+      "arch_variants": {
+        "v73": {
+          "context_binary_file": "tinyheatmapnet_causal9_heads_qnn_context_v73.bin",
+          "context_binary_sha256": "100cc4181beae7715a5c2275d38bcc4fd47530c73e9d00da7ebaa75ab51b7c39",
+          "context_binary_bytes": 639008,
+          "target": "QNN HTP v73 FP16 (Snapdragon 8 Gen 2 / SM8550, 8s Gen 3 / SM8635)",
+          "ai_hub_target_model": "mng1gkd45",
+          "graph_variant": "average_pool_to_depthwise_conv",
+          "layer_placement": "56/56 on NPU, 0 on CPU",
+          "median_inference_ms": 3.146,
+          "decode_gate": {
+            "samples": 8,
+            "presence_mismatch": 0,
+            "argmax_cell_mismatch": 0,
+            "center_error_max_px": 0.007714,
+            "tolerance_px": 10.0,
+            "passed": true
+          },
+          "note": "The unmodified heads graph compiled for v73 fails the decode gate with 856.7 px centre error, because HTP v73 lowers its AveragePool incorrectly; the exact depthwise rewrite (ONNX parity 3.8e-06) brings it to 0.0077 px and 3.146 ms. Measured on AI Hub, Samsung Galaxy S23 (Family) / SM8550 / Hexagon v73, FLOAT16."
+        },
+        "v69": {
+          "context_binary_file": "tinyheatmapnet_causal9_heads_qnn_context_v69.bin",
+          "context_binary_sha256": "1c6e5d2b3d50e93dac4bc7c3e037501377026792a8cf730b6d1135ddfe0d8494",
+          "context_binary_bytes": 716832,
+          "target": "QNN HTP v69 FP16 (Snapdragon 8 Gen 1 / SM8450, 8+ Gen 1 / SM8475)",
+          "ai_hub_target_model": "mnlv6y0yk",
+          "graph_variant": "average_pool_to_depthwise_conv",
+          "layer_placement": "56/56 on NPU, 0 on CPU",
+          "median_inference_ms": 7.402,
+          "decode_gate": {
+            "samples": 8,
+            "presence_mismatch": 0,
+            "argmax_cell_mismatch": 0,
+            "center_error_max_px": 0.004691,
+            "tolerance_px": 10.0,
+            "passed": true
+          },
+          "note": "Measured on AI Hub, Samsung Galaxy S22 (Family) / SM8450 / Hexagon v69, FLOAT16, compiled from the same depthwise rewrite as v73/v75 (rewritten ONNX SHA-256 41ac1aea..., parity 3.8e-06). The 8+ Gen 1 (SM8475) shares this HTP arch, so one artefact serves both. 7.402 ms is the AI Hub estimate, i.e. about 2.4x the v73 artefact: the 2021 HTP is materially slower per inference, but still roughly an order of magnitude below the CPU fallback."
+        },
+        "v79": {
+          "context_binary_file": "tinyheatmapnet_causal9_heads_qnn_context_v79.bin",
+          "context_binary_sha256": "5afdda92cd819aecacb25f05bd9ecf6a8bd69f14047053870d7f8e1bede39055",
+          "context_binary_bytes": 651296,
+          "target": "QNN HTP v79 FP16 (Snapdragon 8 Elite / SM8750, including the Galaxy -AC SKU)",
+          "ai_hub_target_model": "mng1gk63r",
+          "graph_variant": "average_pool_to_depthwise_conv",
+          "layer_placement": "56/56 on NPU, 0 on CPU",
+          "median_inference_ms": 2.089,
+          "decode_gate": {
+            "samples": 8,
+            "presence_mismatch": 0,
+            "argmax_cell_mismatch": 0,
+            "center_error_max_px": 0.006927,
+            "tolerance_px": 10.0,
+            "passed": true
+          },
+          "note": "Measured on AI Hub, Samsung Galaxy S25 (Family) / SM8750-AC / Hexagon v79, FLOAT16, compiled from the same depthwise rewrite as v69/v73/v75. 2.089 ms is the fastest of the four artefacts, and the 8 Elite reports weight sharing support, which this graph does not exploit yet. Device verification is still pending (2026-11-15)."
+        }
       }
     }
   },

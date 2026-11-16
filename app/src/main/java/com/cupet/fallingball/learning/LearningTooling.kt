@@ -1,5 +1,6 @@
 package com.cupet.fallingball.learning
 
+import com.cupet.fallingball.vision.WallContactState
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
@@ -139,15 +140,12 @@ class LearningToolExecutor(private val knowledgeIndex: KnowledgeIndex) {
                 .put("outlier_sample_count", facts.outlierSampleCount)
                 .put("effective_sample_rate_fps", facts.effectiveSampleRateFps)
             MeasurementEvidenceSection.TRAJECTORY -> trajectoryEvidence(snapshot)
-            MeasurementEvidenceSection.WALL -> JSONObject()
-                .put("known_sample_count", facts.wallContactKnownSampleCount)
-                .put("contact_sample_count", facts.wallContactSampleCount)
+            MeasurementEvidenceSection.WALL -> wallContactEvidence(snapshot)
                 .putNullable("average_center_offset_mm", facts.averageCenterOffsetMm)
                 .putNullable("sphere_diameter_mm", facts.sphereDiameterMm)
                 .putNullable("tube_inner_diameter_mm", facts.tubeInnerDiameterMm)
                 .putNullable("correction_model", facts.wallCorrectionModel)
                 .putNullable("corrected_viscosity_pa_s", facts.correctedViscosityPaS)
-                .put("scope_note", "当前修正假设中心轴运动；二维贴壁不能推断三维液膜间隙")
             MeasurementEvidenceSection.DIAGNOSTICS -> JSONObject()
                 .put("availability", snapshot.diagnostics["availability"] ?: "unavailable")
                 .put("values", JSONObject(snapshot.diagnostics))
@@ -188,6 +186,42 @@ class LearningToolExecutor(private val knowledgeIndex: KnowledgeIndex) {
                     .put("wall", point.wallContactState)
                     .put("source", point.detectionSource)
             }))
+    }
+
+    /**
+     * Wall evidence carries the contact ratio and the longest uninterrupted contact run, so a
+     * handful of isolated single-frame mis-detections is never mistaken for real wall contact.
+     */
+    private fun wallContactEvidence(snapshot: LearningMeasurementSnapshot): JSONObject {
+        val facts = snapshot.facts
+        val contactRatio = if (facts.wallContactKnownSampleCount > 0) {
+            facts.wallContactSampleCount.toDouble() / facts.wallContactKnownSampleCount
+        } else {
+            null
+        }
+        var longestRun = 0
+        var currentRun = 0
+        snapshot.trajectory.forEach { point ->
+            val contact = point.wallContactState == WallContactState.LEFT_WALL.name ||
+                point.wallContactState == WallContactState.RIGHT_WALL.name
+            if (contact) {
+                currentRun += 1
+                longestRun = maxOf(longestRun, currentRun)
+            } else {
+                currentRun = 0
+            }
+        }
+        return JSONObject()
+            .put("known_sample_count", facts.wallContactKnownSampleCount)
+            .put("contact_sample_count", facts.wallContactSampleCount)
+            .put("contact_sample_ratio", contactRatio ?: JSONObject.NULL)
+            .put("longest_contact_run", longestRun)
+            .put(
+                "scope_note",
+                "逐帧贴壁判定来自单帧检测框相对管轴的横向偏移，个别、零散、不连续的贴壁点" +
+                    "通常是 ROI/球心检测噪声，约等于没贴壁；只有连续成段或占比明显时才代表真实贴壁。" +
+                    "当前壁面修正还假设球沿中心轴运动，二维数据不能推断三维液膜间隙"
+            )
     }
 
     private fun searchKnowledge(
@@ -326,24 +360,48 @@ object SocraticPrompt {
             不得把学习状态当成测量事实。
         16. 每轮最多提出一个需要学生回答的核心问题；纯事实问题可以不强制反问。
             若提出问题，只使用一个问号，不要用“还是”或“或者”连接两个各自完整的问题。
+
+        【数据常识：以下是软件与物理的既定前提，不要把它们当成疑点或失误】
+        A. 位移为负值是完全正常的。App 用刻度序号表示位置：
+           位移 =（当前刻度序号 − 参考刻度 0）× 每格间距，参考刻度以上自然得到负值。
+           小球在参考刻度上方释放、或最初几帧的检测点落在参考刻度之上时，位移曲线起点就是负的。
+           终端速度取的是匀速段线性拟合的斜率，整体平移不改变斜率，
+           所以负起点既不影响速度也不影响黏度，不要据此质疑数据质量。
+        B. 个别零散的贴壁点基本等于没贴壁。贴壁判定来自单帧检测框相对管轴心的横向偏移：
+           只要某一帧的 YOLO ROI 抖动或球心估计偏了一点，就会凭空多出 1–2 个贴壁点。
+           小球不可能下落得好好的突然贴到管壁又弹回中心，这不符合常识。
+           判断贴壁必须看比例和连续性：几十个采样点中出现个别、零散（不连续）的贴壁点，
+           直接按检测噪声处理；只有贴壁点连续成段、或占已知样本比例明显（远不止几个点，
+           例如达到一成上下）时，才当作真实贴壁并讨论壁面修正与偏心影响。
+           禁止从一堆正常点里挑出几个贴壁点来做文章。
     """.trimIndent()
 
-    fun turnContract(firstTutorTurn: Boolean): String = if (firstTutorTurn) {
-        """
+    fun turnContract(
+        firstTutorTurn: Boolean,
+        requiredEvidenceSection: String? = null
+    ): String {
+        val contract = if (firstTutorTurn) {
+            """
             本轮是该会话的首轮教学，学生尚未展示任何独立推导。可以直接引用当前测量中的数据、统计量、
             图表事实或知识库理论值，但不要直接写出当前实验的最终结论。
             如果学生问的是纯事实、理论、公式、单位或计算步骤，可以直接答完，不强制反问。
             如果学生问的是综合解释或实验结论，最终可见回复可以有两到四句：给出必要事实、
             一条具体观察或方法提示，最后提出一个核心问题。若提出问题，只使用一个“？”，
             不要用“还是”或“或者”连接两个各自完整的问题。
-        """.trimIndent()
-    } else {
-        """
+            """.trimIndent()
+        } else {
+            """
             本轮可以先直接回答事实、理论、公式、单位或计算步骤。
             如果问题涉及当前实验的综合解释或最终结论，则先引用证据，给一条适当层级的提示，再提出一个核心问题。
             学生说“不会”“不懂”“直接告诉我”或连续一次回答偏离时，至少升级一档提示；
             连续两次卡住时可以提供局部计算结构。纯事实问题不强制反问；若提出问题，只使用一个“？”。
-        """.trimIndent()
+            """.trimIndent()
+        }
+        val evidence = requiredEvidenceSection?.let { section ->
+            "\n本轮缺少 $section 证据：请先调用 get_measurement_evidence 读取 $section，" +
+                "取得后在同一次回答里完成本轮，不要重复读取已经提供的证据。"
+        }.orEmpty()
+        return contract + evidence
     }
 
     val questionGeneration: String = """
@@ -376,6 +434,14 @@ object SocraticPrompt {
           · 手机自动追踪在数十上百个采样点中出现少数被自动剔除的异常点属正常现象，
             对结论无实质影响，不要拿它做选题。
           · R² 极高只是说明拟合得好，不要围绕它提问；这类问题每次测量都能问，没有区分度。
+          · 位移曲线的起点是负值属于软件的坐标表示方式：位置以参考刻度为原点
+            （位移 =（刻度序号 − 参考刻度 0）× 每格间距），参考刻度以上就是负值；
+            它既不是测量错误，也不影响匀速段的斜率，因此不要拿负起点出题。
+          · 贴壁判定是逐帧比较球心与管轴的横向偏移，某一帧 YOLO 的 ROI 抖动就会
+            凭空多出 1–2 个「贴壁」点。几十个采样点里出现个别、零散、不连续的贴壁点
+            约等于没贴壁（小球不会下落中途突然贴壁又弹回中心），不要拿这几个点出题；
+            只有当贴壁点连续成段、或占已知样本比例明显（远不止几个点，例如一成上下）时，
+            才按真实贴壁选题。
         - 系统已判定为既定事实的特征（如贴壁下落、偏心、温度未记录），
           当作前提直接问后果，不要再让学生去确认这个事实是否成立。
         - 不罗列学生看不懂的内部统计量或原始计数（如「76 个壁接触样本」「88 个样本中 3 个异常值」）；
@@ -392,6 +458,8 @@ object SocraticPrompt {
         不好：R²=0.9999 说明位移与时间呈什么关系？（学生自己就知道，且是考问语气）
         不好：88 个样本中有 3 个异常值，它们可能出现在曲线的哪个阶段？（噪声，且不像人话）
         不好：76 个壁接触样本对终端速度测量可能产生什么影响？（原始计数 + 含糊语气）
+        不好：我这次位移图的起点是负值，是不是测错了？（软件坐标约定，不是疑点）
+        不好：曲线中间有几个点显示贴壁，小球是不是撞到管壁了？（个别零散贴壁点是检测噪声）
         较好：我这次小球是贴着管壁下落的，算出来的黏度会偏大还是偏小？
         较好：没记温度的话，这次的黏度值还能和标准值比吗？
         较好：壁面修正的公式是怎么算的，这次修正了多少？
@@ -411,12 +479,14 @@ object MeasurementEvidencePolicy {
         "原理", "概念", "定义", "理论", "公式", "一般来说", "是什么", "为什么"
     )
 
-    fun mustReadMeasurementEvidence(
-        userText: String,
-        firstTutorTurn: Boolean,
-        priorEvidenceSections: Set<String> = emptySet()
-    ): Boolean {
-        if (firstTutorTurn) return true
+    /**
+     * The evidence section this turn should read before drawing a conclusion, or null when the
+     * prefetched snapshot and the replayed history already cover everything the question needs.
+     *
+     * This only produces a turn instruction; it never suppresses or discards model output, so a
+     * skipped tool call costs nothing but the answer stays on the model's own judgement.
+     */
+    fun requiredSection(userText: String, priorEvidenceSections: Set<String>): String? {
         val normalized = userText.lowercase()
         val requestedSection = when {
             listOf("轨迹", "曲线", "位移").any(normalized::contains) -> "TRAJECTORY"
@@ -426,13 +496,25 @@ object MeasurementEvidencePolicy {
             measurementTerms.any(normalized::contains) -> "OVERVIEW"
             else -> null
         }
-        if (requestedSection != null) return requestedSection !in priorEvidenceSections
+        if (requestedSection != null) {
+            return requestedSection.takeIf { it !in priorEvidenceSections }
+        }
         // Short follow-ups such as "继续" or "再看看" do not introduce a new
         // measurement claim. Requiring evidence for every such turn creates a
         // repeated read of the same frozen snapshot even though it is already
         // replayed in the request history.
-        return measurementTerms.any(normalized::contains) && conceptualTerms.none(normalized::contains)
+        val implicitOverview = measurementTerms.any(normalized::contains) &&
+            conceptualTerms.none(normalized::contains)
+        return if (implicitOverview) {
+            "OVERVIEW".takeIf { it !in priorEvidenceSections }
+        } else {
+            null
+        }
     }
+
+    /** True while the frozen snapshot still holds evidence this session has never read. */
+    fun hasUnreadSections(priorEvidenceSections: Set<String>): Boolean =
+        MeasurementEvidenceSection.entries.any { it.name !in priorEvidenceSections }
 }
 
 class LearningContextBuilder(private val knowledgeIndex: KnowledgeIndex) {
@@ -450,7 +532,10 @@ class LearningContextBuilder(private val knowledgeIndex: KnowledgeIndex) {
         val context = buildString {
             append("学习目标：").append(state.currentGoal)
             append("\n学习层级：").append(state.learnerLevel)
-            append("\n当前测量的有界快照：").append(snapshotOverview(session.snapshot))
+            append("\n当前测量的有界快照（已包含 ")
+                .append(prefilledEvidenceSections(session.snapshot).joinToString("、"))
+                .append(" 证据，无需再调用工具读取这些 section）：")
+                .append(snapshotOverview(session.snapshot))
             if (state.unresolvedQuestions.isNotEmpty()) {
                 append("\n未解决：").append(state.unresolvedQuestions.joinToString("；"))
             }
@@ -627,18 +712,56 @@ class LearningContextBuilder(private val knowledgeIndex: KnowledgeIndex) {
             .put("measurement_id", snapshot.measurementId)
             .put("fingerprint", snapshot.fingerprint)
             .put("recorded_at_epoch_ms", snapshot.recordedAtEpochMs)
+            .put("liquid_name", snapshot.liquidName)
+            .put("temperature_c", snapshot.temperatureC ?: JSONObject.NULL)
             .put("sample_count", facts.sampleCount)
             .put("valid_sample_count", facts.validSampleCount)
             .put("effective_sample_rate_fps", facts.effectiveSampleRateFps)
             .put("reliable_terminal_estimate", facts.reliableTerminalEstimate)
             .put("terminal_velocity_mm_per_s", facts.terminalVelocityMmPerS ?: JSONObject.NULL)
+            .put("mean_velocity_mm_per_s", facts.meanVelocityMmPerS ?: JSONObject.NULL)
             .put("corrected_viscosity_pa_s", facts.correctedViscosityPaS ?: JSONObject.NULL)
+            .put("uncorrected_viscosity_pa_s", facts.uncorrectedViscosityPaS ?: JSONObject.NULL)
+            .put("wall_correction_model", facts.wallCorrectionModel ?: JSONObject.NULL)
+            .put("reynolds_number", facts.reynoldsNumber ?: JSONObject.NULL)
             .put("r_squared", facts.fittedR2 ?: JSONObject.NULL)
+            .put("fit_start_mm", facts.fitStartMm ?: JSONObject.NULL)
+            .put("fit_end_mm", facts.fitEndMm ?: JSONObject.NULL)
+            .put("fit_duration_ms", facts.fitDurationMs ?: JSONObject.NULL)
+            .put("outlier_sample_count", facts.outlierSampleCount)
+            .put("wall_contact_sample_count", facts.wallContactSampleCount)
+            .put("wall_contact_known_sample_count", facts.wallContactKnownSampleCount)
+            .put(
+                "wall_contact_sample_ratio",
+                if (facts.wallContactKnownSampleCount > 0) {
+                    facts.wallContactSampleCount.toDouble() / facts.wallContactKnownSampleCount
+                } else {
+                    JSONObject.NULL
+                }
+            )
+            .put("average_center_offset_mm", facts.averageCenterOffsetMm ?: JSONObject.NULL)
+            .put("sphere_diameter_mm", facts.sphereDiameterMm ?: JSONObject.NULL)
+            .put("tube_inner_diameter_mm", facts.tubeInnerDiameterMm ?: JSONObject.NULL)
+            .put("liquid_density_g_per_cm3", facts.liquidDensityGPerCm3 ?: JSONObject.NULL)
+            .put("sphere_density_g_per_cm3", facts.sphereDensityGPerCm3 ?: JSONObject.NULL)
             .put("diagnostics_available", facts.diagnosticsAvailable)
             .toString()
     }
 
     companion object {
+        /**
+         * Measurement evidence that is always present in the developer context, so the model can
+         * answer without spending an extra tool round trip on the first turn.
+         */
+        val PREFILLED_EVIDENCE_SECTIONS = setOf("OVERVIEW", "FIT")
+
+        /** Prefetched sections for one snapshot; missing diagnostics are known-missing, not unread. */
+        fun prefilledEvidenceSections(snapshot: LearningMeasurementSnapshot): Set<String> =
+            buildSet {
+                addAll(PREFILLED_EVIDENCE_SECTIONS)
+                if (!snapshot.facts.diagnosticsAvailable) add("DIAGNOSTICS")
+            }
+
         const val MAX_RECENT_MESSAGES = 24
         const val MAX_RECENT_TOOL_ACTIONS = 10
         const val MAX_TOOL_ARGUMENT_CHARS = 1_200

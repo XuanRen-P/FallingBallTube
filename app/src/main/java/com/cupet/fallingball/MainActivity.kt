@@ -211,6 +211,9 @@ class MainActivity : AppCompatActivity() {
                 DebugTestAction.BENCHMARK_TINY_PARENT -> {
                     cameraController?.benchmarkTinyParent()
                 }
+                DebugTestAction.BENCHMARK_TINY_PREPROCESS -> {
+                    cameraController?.benchmarkTinyPreprocess()
+                }
                 DebugTestAction.BENCHMARK_TINY_CPU_THREADS -> {
                     cameraController?.benchmarkTinyCpuThreads()
                 }
@@ -318,7 +321,6 @@ class MainActivity : AppCompatActivity() {
         binding.btnTrack.setText(R.string.btn_stop_track)
         binding.btnHistory.isEnabled = false
         binding.btnConfig.isEnabled = false
-        binding.cameraRow.visibility = View.VISIBLE
         binding.btnRelock.isEnabled = false
         binding.root.keepScreenOn = true
     }
@@ -349,7 +351,6 @@ class MainActivity : AppCompatActivity() {
         measurementControlsLocked = false
         updateCameraControlAvailability()
         binding.btnTrack.setText(R.string.btn_start_track)
-        binding.cameraRow.visibility = View.VISIBLE
         binding.btnRelock.isEnabled = true
         binding.root.keepScreenOn = false
         binding.btnHistory.isEnabled = true

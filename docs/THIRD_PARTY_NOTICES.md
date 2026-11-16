@@ -29,6 +29,21 @@ NCNN 允许按其 BSD 3-Clause 条款分发源码和二进制；分发时应保�
 | `libQnnHtpV75CalculatorStub.so` | `lib/aarch64-android/` |
 | `libQnnHtpV75.so` | `lib/hexagon-v75/unsigned/` |
 | `libQnnHtpV75Skel.so` | `lib/hexagon-v75/unsigned/` |
+| `libQnnHtpV73Stub.so` | `lib/aarch64-android/` |
+| `libQnnHtpV73CalculatorStub.so` | `lib/aarch64-android/` |
+| `libQnnHtpV73.so` | `lib/hexagon-v73/unsigned/` |
+| `libQnnHtpV73Skel.so` | `lib/hexagon-v73/unsigned/` |
+| `libQnnHtpV69Stub.so` | `lib/aarch64-android/` |
+| `libQnnHtpV69CalculatorStub.so` | `lib/aarch64-android/` |
+| `libQnnHtpV69.so` | `lib/hexagon-v69/unsigned/` |
+| `libQnnHtpV69Skel.so` | `lib/hexagon-v69/unsigned/` |
+
+v73 的四份是 2026-11-15 为骁龙 8 Gen 2 / 8s Gen 3 的 HTP 后端新增的；它们与同一次核对中的 ZIP
+条目逐字节一致（SHA-256 分别为 `d4749b59…bcc0a`、`876c5548…5c79`、`bab126f2…85e7de`、
+`e3070ed8…fb2dd`）。v69 的四份同日为骁龙 8 Gen 1 / 8+ Gen 1 新增，同样逐字节核对过
+（SHA-256：`libQnnHtpV69Stub.so` = `b7063e68…46d6`、`libQnnHtpV69CalculatorStub.so` = `b773196c…a05c`、
+`libQnnHtpV69.so` = `1d1bcfec…77e6`、`libQnnHtpV69Skel.so` = `93c395d8…9e55`）。
+这些文件同样不进入公共仓库（`.gitignore` 覆盖），构建时从外部 SDK 获取。
 
 上述文件对应 QAIRT 2.50，不能用本地缓存中 `com.qualcomm.qti:qnn-runtime:2.42.0` 的版本号作为来源说明。
 

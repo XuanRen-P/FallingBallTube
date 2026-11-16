@@ -438,7 +438,10 @@ internal class LearningConversationAdapter(
                 bubble.text = MarkdownRenderer.render(message.text.ifBlank {
                     when (message.state) {
                         LearningMessageState.STREAMING -> " "
-                        LearningMessageState.ERROR -> "本次生成未完成，可点击重试"
+                        LearningMessageState.ERROR -> message.failureReason
+                            .takeIf(String::isNotBlank)
+                            ?.let { "本次生成未完成：$it" }
+                            ?: "本次生成未完成，可点击重试"
                         LearningMessageState.STOPPED -> "已停止生成"
                         LearningMessageState.COMPLETE -> ""
                     }

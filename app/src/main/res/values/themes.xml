@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="Theme.FallingBallTube" parent="Theme.MaterialComponents.Light.NoActionBar">
         <item name="colorPrimary">@color/accent</item>
@@ -20,5 +20,43 @@
     <style name="Theme.FallingBallTube.Camera" parent="Theme.FallingBallTube">
         <item name="colorPrimary">@color/camera_accent</item>
         <item name="colorPrimaryVariant">@color/camera_accent</item>
+    </style>
+
+    <!--
+      Five camera actions share one row, so the secondary actions drop the Material insets and
+      padding that made four text buttons plus the measurement button overflow a phone width.
+      The primary button keeps the accent fill and auto-sizes its label into whatever width the
+      weighted slot has left (10sp..13sp).
+    -->
+    <style name="Widget.FallingBallTube.ActionButton" parent="Widget.MaterialComponents.Button.OutlinedButton">
+        <item name="android:textSize">11sp</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:minHeight">44dp</item>
+        <item name="android:paddingLeft">5dp</item>
+        <item name="android:paddingRight">5dp</item>
+        <item name="android:insetLeft">0dp</item>
+        <item name="android:insetRight">0dp</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+        <item name="android:textColor">@color/camera_text_primary</item>
+        <item name="strokeColor">@color/camera_secondary</item>
+    </style>
+
+    <style name="Widget.FallingBallTube.ActionButton.Primary" parent="Widget.MaterialComponents.Button">
+        <item name="android:minWidth">0dp</item>
+        <item name="android:minHeight">44dp</item>
+        <item name="android:paddingLeft">6dp</item>
+        <item name="android:paddingRight">6dp</item>
+        <item name="android:insetLeft">0dp</item>
+        <item name="android:insetRight">0dp</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+        <item name="android:maxLines">1</item>
+        <item name="android:textColor">@color/camera_on_accent</item>
+        <item name="backgroundTint">@color/camera_accent</item>
+        <item name="autoSizeTextType">uniform</item>
+        <item name="autoSizeMinTextSize">9sp</item>
+        <item name="autoSizeMaxTextSize">13sp</item>
+        <item name="autoSizeStepGranularity">1sp</item>
     </style>
 </resources>

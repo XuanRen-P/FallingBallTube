@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Ids of the camera optics bar, which builds its rows programmatically in CameraOpticsView. -->
+    <item name="camera_optics_bar" type="id" />
+    <item name="camera_optics_tuning" type="id" />
+    <item name="camera_optics_presets" type="id" />
+    <item name="camera_optics_expand" type="id" />
+    <item name="camera_optics_current" type="id" />
+    <item name="camera_optics_focus_toggle" type="id" />
+    <item name="camera_optics_focus_ruler" type="id" />
+    <item name="camera_optics_zoom_slider" type="id" />
+</resources>

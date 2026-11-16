@@ -1,5 +1,22 @@
-# Machine-local configuration, credentials, and signing material.
+*.iml
+.gradle
+/.gradle-user/
+/.kotlin/
 /local.properties
+/.idea
+.DS_Store
+/build
+/app/build
+/captures
+/runs/
+.externalNativeBuild
+.cxx
+*.apk
+*.ap_
+*.dex
+*.aab
+
+# Machine-local credentials and signing material.
 /.secrets/
 .env
 .env.*
@@ -7,44 +24,52 @@
 *.jks
 *.keystore
 key.properties
-
-# IDE, Gradle, native build, and packaged app outputs.
-/.idea/
-*.iml
-.gradle/
-/.gradle-user/
-/.kotlin/
-**/build/
-.cxx/
-.externalNativeBuild/
-*.apk
-*.aab
-*.ap_
-*.dex
-.DS_Store
-
-# QNN SDK is supplied locally, outside the public source repository.
+# Obtain proprietary QNN SDK headers separately; see README.md.
 /app/src/main/cpp/third_party/qnn/
 /app/src/main/jniLibs/**/libQnn*.so
 
-# This repository publishes the Android app only.
-/dev_tools/
-/tools/
-/promo/
-/runs/
-/captures/
-/generated-images/
-/.device-validation/
+# Large local experiment inputs/backups.
 /测试视频/
-/已过时内容/
+/FallingBallTube-source-*.zip
+/FallingBallTube-*.zip
+/yolo26n.pt
+
+# Local validation, document renders, and generated presentation media.
+/.device-validation/
+/_docx_render*/
+/generated-images/
+/代表性图*.png
+/代表性视频*.mp4
+/promo/*.mp4
+/promo/audio/*.wav
+
+# Dev/debug outputs, Python caches, and exported model artifacts.
+# Keep reproducibility scripts in dev_tools tracked while ignoring its local images,
+# logs, exported models, and one-off diagnostics.
+/dev_tools/*
+!/dev_tools/gen_golden_vectors.py
+!/dev_tools/requirements.txt
+!/dev_tools/analyze_tracking_diagnostics.py
+!/dev_tools/collect_tracking_diagnostics.py
+!/dev_tools/test_tracking_diagnostics.py
+!/dev_tools/device_video_test.py
+!/dev_tools/test_device_video_test.py
+!/dev_tools/field_video_replay.py
+!/dev_tools/ball_video_lab/
+!/dev_tools/ball_video_lab/**
+/dev_tools/ball_video_lab/outputs/
+/dev_tools/ball_video_lab/runs/
+/dev_tools/ball_video_lab/.venv/
 /Ultralytics/
-/app/src/test/
-/app/src/androidTest/
-/app/src/debug/
-/*.cmd
-/*.zip
-/*.pt
-/*.onnx
-*.py[cod]
 __pycache__/
 .pytest_cache/
+*.py[cod]
+
+# Anchor model ignores to the repository root. The model under
+# app/src/main/assets ships in the APK and must remain tracked.
+/best.pt
+/best.onnx
+
+# DSH harness scratch space and device transfer reports (machine-local).
+/.dsh_tmp/
+/.dsh_transfer_report.txt

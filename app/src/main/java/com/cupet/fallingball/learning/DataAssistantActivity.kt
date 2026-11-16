@@ -396,8 +396,7 @@ class DataAssistantActivity : AppCompatActivity() {
             ) {
                 QuestionWorkScheduler.enqueue(
                     this@DataAssistantActivity,
-                    loaded.id,
-                    replace = forceQuestionRegeneration
+                    loaded.id
                 )
                 if (!opened.hasConversation) pollQuestions(opened)
             }
@@ -641,6 +640,9 @@ class DataAssistantActivity : AppCompatActivity() {
         val attachments = selectedAttachments.toList()
         selectedAttachments.clear()
         renderAttachmentStrip()
+        // The student is asking a real question now, so the queued suggestion drafting for this
+        // measurement is pointless and would only compete for the same model capacity.
+        QuestionWorkScheduler.cancelPending(this)
         questionsPanel.removeAllViews()
         questionsPanel.visibility = View.GONE
         promptPanel.visibility = View.GONE
@@ -985,7 +987,7 @@ class DataAssistantActivity : AppCompatActivity() {
                 services.tutor.openSession(latest)
             }
             renderSession(opened)
-            QuestionWorkScheduler.enqueue(this@DataAssistantActivity, latest.id, replace = true)
+            QuestionWorkScheduler.enqueue(this@DataAssistantActivity, latest.id)
             pollQuestions(opened)
         }
     }

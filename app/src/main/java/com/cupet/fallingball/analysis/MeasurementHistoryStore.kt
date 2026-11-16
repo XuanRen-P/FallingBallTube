@@ -14,6 +14,7 @@ import java.io.FileOutputStream
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.util.Properties
 
 data class MeasurementRecordSummary(
     val id: String,
@@ -24,12 +25,22 @@ data class MeasurementRecordSummary(
     val parametersComplete: Boolean,
     val viscosityResult: ViscosityResult?,
     val sampleCount: Int,
-    val source: MeasurementSource = MeasurementSource.UNKNOWN
+    val source: MeasurementSource = MeasurementSource.UNKNOWN,
+    val sphereDiameterMm: Double? = null,
+    val tubeInnerDiameterMm: Double? = null,
+    /** User-assigned list label; stored beside the record, never inside the `.fbr` payload. */
+    val mark: HistoryMarkColor? = null
 )
 
 data class MeasurementHistoryScan(
     val summaries: List<MeasurementRecordSummary>,
     val corruptedFileNames: List<String>
+)
+
+/** A soft-deleted measurement, with the wall-clock time it was moved to the trash. */
+data class TrashedMeasurementSummary(
+    val summary: MeasurementRecordSummary,
+    val trashedAtEpochMs: Long
 )
 
 /**
@@ -39,6 +50,9 @@ data class MeasurementHistoryScan(
  * seam. Callers must execute it away from the Android main thread.
  */
 class MeasurementHistoryStore(private val directory: File) {
+
+    /** Soft-deleted records live in a hidden subfolder so list scans never see them. */
+    private val trashDirectory = File(directory, TRASH_DIR_NAME)
 
     fun save(record: MeasurementRecord) {
         validateId(record.id)
@@ -55,6 +69,7 @@ class MeasurementHistoryStore(private val directory: File) {
     }
 
     fun scanSummaries(): MeasurementHistoryScan {
+        val marks = readMarks()
         val summaries = ArrayList<MeasurementRecordSummary>()
         val corrupted = ArrayList<String>()
         recordFiles().forEach { file ->
@@ -63,7 +78,7 @@ class MeasurementHistoryStore(private val directory: File) {
                     MeasurementRecordCodec.readSummaryOnly(it)
                 }
             }.fold(
-                onSuccess = summaries::add,
+                onSuccess = { summary -> summaries += summary.copy(mark = marks[summary.id]) },
                 onFailure = { corrupted += file.name }
             )
         }
@@ -99,8 +114,172 @@ class MeasurementHistoryStore(private val directory: File) {
     fun delete(id: String): Boolean {
         if (!VALID_ID.matches(id)) return false
         val file = recordFile(id)
-        return file.exists() && file.delete()
+        val deleted = file.exists() && file.delete()
+        if (deleted) {
+            runCatching { setMark(id, null) }
+        }
+        return deleted
     }
+
+    /**
+     * Soft-deletes [id] into the trash. Learning-assistant data is intentionally kept so a
+     * restore is lossless; permanent purge removes it from the caller.
+     */
+    fun moveToTrash(id: String): Boolean {
+        if (!VALID_ID.matches(id)) return false
+        val source = recordFile(id)
+        if (!source.isFile) return false
+        ensureTrashDirectory()
+        val target = trashFile(id)
+        return runCatching {
+            if (target.exists()) target.delete()
+            Files.move(
+                source.toPath(),
+                target.toPath(),
+                StandardCopyOption.REPLACE_EXISTING
+            )
+            target.setLastModified(System.currentTimeMillis())
+            true
+        }.getOrDefault(false)
+    }
+
+    fun trashSummaries(): List<TrashedMeasurementSummary> {
+        val marks = readMarks()
+        return trashFiles().mapNotNull { file ->
+            val id = idFromTrashFile(file) ?: return@mapNotNull null
+            runCatching {
+                DataInputStream(BufferedInputStream(FileInputStream(file))).use {
+                    val summary = MeasurementRecordCodec.readSummaryOnly(it)
+                    TrashedMeasurementSummary(
+                        summary = summary.copy(mark = marks[id]),
+                        trashedAtEpochMs = file.lastModified()
+                    )
+                }
+            }.getOrNull()
+        }.sortedByDescending { it.trashedAtEpochMs }
+    }
+
+    fun trashIds(): List<String> = trashFiles().mapNotNull(::idFromTrashFile)
+
+    fun restore(id: String): Boolean {
+        if (!VALID_ID.matches(id)) return false
+        val source = trashFile(id)
+        if (!source.isFile) return false
+        ensureDirectory()
+        val target = recordFile(id)
+        if (target.exists()) return false
+        return runCatching {
+            Files.move(
+                source.toPath(),
+                target.toPath(),
+                StandardCopyOption.REPLACE_EXISTING
+            )
+            true
+        }.getOrDefault(false)
+    }
+
+    /** Permanently removes one trashed record and its label. */
+    fun purgeTrash(id: String): Boolean {
+        if (!VALID_ID.matches(id)) return false
+        val file = trashFile(id)
+        val deleted = file.isFile && file.delete()
+        if (deleted) {
+            runCatching { setMark(id, null) }
+        }
+        return deleted
+    }
+
+    private fun ensureTrashDirectory() {
+        if (!trashDirectory.exists() && !trashDirectory.mkdirs() && !trashDirectory.isDirectory) {
+            throw IllegalStateException("Cannot create measurement trash directory")
+        }
+    }
+
+    private fun trashFile(id: String) = File(trashDirectory, "$FILE_PREFIX$id.$FILE_EXTENSION")
+
+    private fun trashFiles(): List<File> =
+        trashDirectory.listFiles { file ->
+            file.isFile &&
+                file.name.startsWith(FILE_PREFIX) &&
+                file.extension == FILE_EXTENSION
+        }?.toList().orEmpty()
+
+    private fun idFromTrashFile(file: File): String? {
+        val name = file.name
+        if (!name.startsWith(FILE_PREFIX) || file.extension != FILE_EXTENSION) return null
+        return name.removePrefix(FILE_PREFIX).removeSuffix(".$FILE_EXTENSION")
+            .takeIf { VALID_ID.matches(it) }
+    }
+
+    /** All user labels, keyed by record id. Malformed sidecar files degrade to an empty map. */
+    fun marks(): Map<String, HistoryMarkColor> = readMarks()
+
+    fun markOf(id: String): HistoryMarkColor? =
+        if (VALID_ID.matches(id)) readMarks()[id] else null
+
+    /**
+     * Sets or clears ([mark] = null) the list label of [id]. The `.fbr` payload is never
+     * rewritten, so historical physics data stays byte-for-byte intact.
+     */
+    fun setMark(id: String, mark: HistoryMarkColor?) {
+        if (!VALID_ID.matches(id)) return
+        setMarks(listOf(id), mark)
+    }
+
+    /** Applies one batch label to many records with a single sidecar write. */
+    fun setMarks(ids: Collection<String>, mark: HistoryMarkColor?) {
+        val validIds = ids.filter { VALID_ID.matches(it) }
+        if (validIds.isEmpty()) return
+        ensureDirectory()
+        val marks = readMarks().toMutableMap()
+        validIds.forEach { id ->
+            if (mark == null) marks.remove(id) else marks[id] = mark
+        }
+        writeMarks(marks)
+    }
+
+    private fun readMarks(): Map<String, HistoryMarkColor> {
+        val file = marksFile()
+        if (!file.isFile) return emptyMap()
+        return runCatching {
+            val properties = Properties()
+            file.reader(Charsets.UTF_8).use(properties::load)
+            properties.stringPropertyNames()
+                .filter { VALID_ID.matches(it) }
+                .mapNotNull { id -> HistoryMarkColor.fromName(properties.getProperty(id))?.let { id to it } }
+                .toMap()
+        }.getOrDefault(emptyMap())
+    }
+
+    private fun writeMarks(marks: Map<String, HistoryMarkColor>) {
+        val properties = Properties()
+        marks.toSortedMap().forEach { (id, mark) -> properties.setProperty(id, mark.name) }
+        val target = marksFile()
+        val temporary = File(directory, ".$MARKS_FILE_NAME.tmp")
+        try {
+            temporary.writer(Charsets.UTF_8).use { writer ->
+                properties.store(writer, MARKS_HEADER)
+            }
+            try {
+                Files.move(
+                    temporary.toPath(),
+                    target.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING
+                )
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(
+                    temporary.toPath(),
+                    target.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING
+                )
+            }
+        } finally {
+            if (temporary.exists()) temporary.delete()
+        }
+    }
+
+    private fun marksFile() = File(directory, MARKS_FILE_NAME)
 
     private fun writeAtomically(record: MeasurementRecord) {
         val target = recordFile(record.id)
@@ -150,6 +329,9 @@ class MeasurementHistoryStore(private val directory: File) {
     private companion object {
         const val FILE_PREFIX = "measurement_"
         const val FILE_EXTENSION = "fbr"
+        const val TRASH_DIR_NAME = ".trash"
+        const val MARKS_FILE_NAME = "record_marks.properties"
+        const val MARKS_HEADER = "FallingBallTube measurement record marks (id=COLOR)"
         val VALID_ID = Regex("[A-Za-z0-9_-]{1,100}")
     }
 }
@@ -353,7 +535,9 @@ private object MeasurementRecordCodec {
                 )
             } == true
         },
-        sampleCount = sampleCount
+        sampleCount = sampleCount,
+        sphereDiameterMm = viscometryParameters.sphereDiameterMm,
+        tubeInnerDiameterMm = viscometryParameters.tubeInnerDiameterMm
     )
 
     private fun MeasurementRecord.toSummary() = MeasurementRecordSummary(
@@ -365,7 +549,9 @@ private object MeasurementRecordCodec {
         parametersComplete = viscometryParameters.isComplete,
         viscosityResult = viscosityResult.takeIf { hasReliableTerminalEstimate },
         sampleCount = samples.size,
-        source = source
+        source = source,
+        sphereDiameterMm = viscometryParameters.sphereDiameterMm,
+        tubeInnerDiameterMm = viscometryParameters.tubeInnerDiameterMm
     )
 
     private fun readHeader(input: DataInputStream): Header {

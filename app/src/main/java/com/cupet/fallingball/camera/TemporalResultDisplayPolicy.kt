@@ -14,15 +14,27 @@ internal object TemporalResultDisplayPolicy {
     private const val MAX_AGE_MS = 1_500L
     private const val PERIODS_TO_KEEP = 1.5f
 
+    /** Below this cadence the hand-off adds whole periods, so the window has to grow too. */
+    private const val SLOW_CADENCE_FPS = 8f
+    private const val SLOW_PERIODS_TO_KEEP = 3.0f
+
     fun maxAgeMs(modelFps: Float, inferenceMs: Float?): Long {
         val periodMs = modelFps
             .takeIf { it.isFinite() && it > 0f }
             ?.let { 1_000f / it }
             ?: 0f
         val runtimeMs = inferenceMs?.takeIf { it.isFinite() && it > 0f } ?: 0f
-        return ceil(maxOf(MIN_AGE_MS.toFloat(), periodMs, runtimeMs) * PERIODS_TO_KEEP)
-            .toLong()
-            .coerceIn(MIN_AGE_MS, MAX_AGE_MS)
+        val base = maxOf(MIN_AGE_MS.toFloat(), periodMs, runtimeMs)
+        // A slow device queues the result behind the camera phase and the next hand-off, so a
+        // 1.5-period window hid every point on the 4-5 FPS Dimensity path even though the same
+        // frames were being recorded (record only requires ordering).  Measured there:
+        // ages 300-635 ms against a 375 ms window.  Fast cadence keeps the tight window.
+        val periods = if (modelFps.isFinite() && modelFps > 0f && modelFps < SLOW_CADENCE_FPS) {
+            SLOW_PERIODS_TO_KEEP
+        } else {
+            PERIODS_TO_KEEP
+        }
+        return ceil(base * periods).toLong().coerceIn(MIN_AGE_MS, MAX_AGE_MS)
     }
 }
 

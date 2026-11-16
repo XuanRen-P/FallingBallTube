@@ -3,6 +3,7 @@ package com.cupet.fallingball.vision
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
+import ai.onnxruntime.TensorInfo
 import ai.onnxruntime.providers.NNAPIFlags
 import android.content.Context
 import android.util.Log
@@ -43,6 +44,12 @@ data class TinyHeatmapFrameCandidates(
     /** Time spent constructing the five parent input channels. */
     val preprocessMs: Float = 0f,
     val parentLatencyStats: TinyHeatmapLatencyStats = TinyHeatmapLatencyStats(),
+    /**
+     * Fraction of lag-1/lag-3 motion channels that found their exact source frame in the
+     * history snapshot. A dropped capture makes its channel fall back to "no motion", so a
+     * rate below 1.0 means the parent is silently seeing a degraded causal input.
+     */
+    val motionHistoryHitRate: Float = 1f,
     val pipelineTimings: TinyPipelineStageTimings = TinyPipelineStageTimings.EMPTY
 ) {
     val runtime: TinyHeatmapRuntimeDiagnostics
@@ -56,6 +63,7 @@ data class TinyHeatmapFrameCandidates(
             postprocessMs = postprocessMs,
             rerankerMs = rerankerMs,
             totalMs = inferenceMs,
+            motionHistoryHitRate = motionHistoryHitRate,
             parentLatencyStats = parentLatencyStats
         )
 }
@@ -71,7 +79,40 @@ class TinyHeatmapNetBallDetector(
     context: Context,
     /** Debug benchmarks can disable hardware selection to measure a CPU configuration directly. */
     private val allowHardwareParent: Boolean = true,
-    private val cpuInferenceThreads: Int = inferenceThreadCount()
+    private val cpuInferenceThreads: Int = inferenceThreadCount(),
+    /**
+     * Whether to re-score the parent's top-5 peaks with the candidate reranker.
+     *
+     * **Off by default, and the evidence says it should stay off.**
+     *
+     * The reranker costs `patch_extraction` 4.34 ms + `reranker_inference` 1.08 ms
+     * per frame (measured on an SM8650 device), which is roughly what the causal
+     * motion channels cost to materialise for the 9-channel parent. Dropping it
+     * is therefore what keeps end-to-end frame rate neutral after the parent
+     * grew from 5 to 9 input channels.
+     *
+     * Two independent measurements say it buys nothing:
+     *
+     * 1. **Its ordering is the parent's ordering.** Over 20,518 multi-candidate
+     *    frames spanning 14 clips, 3 tube diameters and both recording batches,
+     *    the 5-way ranking by `reranker_logit` is identical to the ranking by
+     *    `parent_score` in 100.00% of frames, and the argmax differs in 0 frames
+     *    (95% upper bound on the disagreement rate < 0.015%).
+     * 2. **Its calibration does not move the answer.** Replacing every
+     *    `reranker_logit` with `logit(parent_score)` — leaving the ordering
+     *    untouched and changing only the confidence that reaches the fall gate —
+     *    reproduced the terminal velocity to 0.0 mm/s on every clip of the
+     *    tube-held-out fold, with identical fit sample counts and decode paths.
+     *
+     * Scope limit, stated plainly: every frame in that evidence is glycerin. Castor
+     * oil was not measured, on the argument that a ball visible in a single frame
+     * gives the parent heatmap an easier peak than glycerin's motion-only signal
+     * does. If castor regressions ever appear, this flag is the first thing to
+     * turn back on — the graph and the assets still ship either way.
+     *
+     * See `dev_tools/ball_video_lab/outputs/unified_v2_20260912/reranker_ablation.json`.
+     */
+    private val candidateReranker: Boolean = false
 ) : AutoCloseable {
     private data class HistoryFrame(
         val bytes: ByteArray,
@@ -100,22 +141,27 @@ class TinyHeatmapNetBallDetector(
     private var qnnParentAttempted = false
     private var hardwareParentAttempted = false
     /** One batched call is substantially cheaper than five scalar ORT calls on a camera frame. */
-    private var batchedRerankerSession: OrtSession? = createOptionalSession(
-        appContext,
-        RERANKER_BATCH_MODEL_FILE
-    )
+    private var batchedRerankerSession: OrtSession? = if (candidateReranker) {
+        createOptionalSession(appContext, RERANKER_BATCH_MODEL_FILE)
+    } else {
+        null
+    }
     /** Kept as a compatibility fallback for old APK assets or a batch-shape runtime failure. */
-    private val rerankerSession = createSession(appContext, RERANKER_MODEL_FILE)
+    private val rerankerSession = if (candidateReranker) {
+        createSession(appContext, RERANKER_MODEL_FILE)
+    } else {
+        null
+    }
     private val history = ArrayDeque<HistoryFrame>(HISTORY_CAPACITY)
+    /** Diagnostic counters for how often the causal history actually had the exact lag frame. */
+    private var motionHistoryHits = 0L
+    private var motionHistoryLookups = 0L
     private val rawBytes = ByteArray(PIXELS)
     private val flatBytes = ByteArray(PIXELS)
     private val historyFlatBytes = ByteArray(PIXELS)
     /** Exact O(n) median support: ROI samples are uint8 and motion residuals are integral. */
     private val byteHistogram = IntArray(IntegralMedian.BYTE_LEVELS)
     private val differenceHistogram = IntArray(IntegralMedian.DIFFERENCE_LEVELS)
-    private val currentFlat = FloatArray(PIXELS)
-    private val historyFlat = FloatArray(PIXELS)
-    private val differenceScratch = FloatArray(PIXELS)
     /** Deferred motion channels: one median-centred residual per lag, expanded on demand. */
     private val motionResidual = Array(MOTION_LAGS.size) { FloatArray(PIXELS) }
     private val input = FloatArray(PARENT_CHANNELS * PIXELS)
@@ -190,6 +236,8 @@ class TinyHeatmapNetBallDetector(
         history.clear()
         frameCount = 0
         previousTimestampNs = 0L
+        motionHistoryHits = 0L
+        motionHistoryLookups = 0L
     }
 
     @Synchronized
@@ -237,12 +285,12 @@ class TinyHeatmapNetBallDetector(
         check(!closed) { "TinyHeatmapNet detector is closed" }
         require(iterations in 1..100) { "Benchmark iterations must be in 1..100" }
         val session = createSession(appContext, assetName, useNnapi)
+        val inputChannels = parentInputChannels(session)
         return try {
-            input.fill(0.5f)
-            repeat(2) { runBenchmarkSession(session) }
+            repeat(2) { runBenchmarkSession(session, inputChannels) }
             val samples = FloatArray(iterations) {
                 val started = System.nanoTime()
-                runBenchmarkSession(session)
+                runBenchmarkSession(session, inputChannels)
                 (System.nanoTime() - started) / 1_000_000f
             }
             TinyHeatmapBenchmarkResult(
@@ -263,6 +311,94 @@ class TinyHeatmapNetBallDetector(
         } finally {
             session.close()
         }
+    }
+
+    /**
+     * Measures [buildInput] on a synthetic ROI, without the parent.
+     *
+     * Preprocessing is roughly two thirds of a frame and `parent_inference` cannot see it, so
+     * an optimisation needs its own number.  History is primed for every iteration with a
+     * *different* homography, which forces the real lag path (invert + warp + difference
+     * median) instead of the "geometry unchanged" fast path.  The produced tensor is
+     * checksummed and logged: a bit-exact refactor must keep the same checksum.
+     */
+    @Synchronized
+    internal fun benchmarkPreprocessResult(iterations: Int = 8): TinyHeatmapBenchmarkResult {
+        check(!closed) { "TinyHeatmapNet detector is closed" }
+        require(iterations in 1..100) { "Benchmark iterations must be in 1..100" }
+        val current = benchmarkGeometry(0.0)
+        val historyGeometry = benchmarkGeometry(1.0)
+        val timer = TinyPipelineStageTimer.enabled()
+        val warmups = 2
+        repeat(warmups) {
+            primeBenchmarkHistory(historyGeometry)
+            runPreprocessIteration(current, timer)
+        }
+        val samples = FloatArray(iterations) {
+            primeBenchmarkHistory(historyGeometry)
+            val started = System.nanoTime()
+            runPreprocessIteration(current, timer)
+            (System.nanoTime() - started) / 1_000_000f
+        }
+        val runs = iterations + warmups
+        val stages = timer.snapshot().measuredStages()
+            .entries
+            .joinToString(" ") { (name, totalMs) -> "$name=${"%.2f".format(totalMs / runs)}" }
+        Log.i(TAG, "preprocess checksum=" + inputChecksumHex() + " stages(ms/frame): " + stages)
+        return TinyHeatmapBenchmarkResult(
+            backendName = "preprocess_cpu",
+            computeUnit = "CPU",
+            providerPlacementVerified = true,
+            samplesMs = samples,
+            assetName = PARENT_MODEL_FILE,
+            placementSummary = "preprocess_only"
+        )
+    }
+
+    /** Unit homography, optionally translated so the history warp cannot take the fast path. */
+    private fun benchmarkGeometry(xShift: Double): TubeRoiGeometry {
+        val matrix = DoubleArray(9).also {
+            it[0] = 1.0
+            it[2] = xShift
+            it[4] = 1.0
+            it[8] = 1.0
+        }
+        return TubeRoiGeometry(
+            revision = 1L,
+            sourceQuad = FloatArray(8),
+            sourceToRoi = matrix,
+            roiToSource = matrix.copyOf()
+        )
+    }
+
+    private fun primeBenchmarkHistory(geometry: TubeRoiGeometry) {
+        history.clear()
+        for (lag in MOTION_LAGS) {
+            val bytes = ByteArray(PIXELS)
+            for (index in 0 until PIXELS) {
+                bytes[index] = ((index * 37 + lag * 11) and 0xff).toByte()
+            }
+            history.addLast(HistoryFrame(bytes, geometry, -lag))
+        }
+    }
+
+    private fun runPreprocessIteration(
+        geometry: TubeRoiGeometry,
+        timer: TinyPipelineStageTimer = TinyPipelineStageTimer.disabled()
+    ) {
+        for (index in 0 until PIXELS) {
+            rawBytes[index] = (((index * 31) ushr 3) and 0xff).toByte()
+        }
+        buildInput(rawBytes, geometry, 0, timer)
+    }
+
+    /** FNV-1a over the raw float bits of the produced 9-channel tensor. */
+    private fun inputChecksumHex(): String {
+        var hash = -0x340d631b
+        for (value in input) {
+            hash = (hash xor value.toRawBits()) * 0x01000193
+        }
+        return Integer.toHexString(hash)
     }
 
     /** Backend identity after the most recent parent run, including a hardware fallback. */
@@ -379,6 +515,11 @@ class TinyHeatmapNetBallDetector(
             rerankerMs = lastRerankerMs,
             preprocessMs = preprocessMs,
             parentLatencyStats = lastParentLatencyStats,
+            motionHistoryHitRate = if (motionHistoryLookups == 0L) {
+                1f
+            } else {
+                motionHistoryHits.toFloat() / motionHistoryLookups.toFloat()
+            },
             pipelineTimings = stageTimer.snapshot()
         )
     }
@@ -390,11 +531,13 @@ class TinyHeatmapNetBallDetector(
         stageTimer: TinyPipelineStageTimer
     ) {
         val flattenStarted = stageTimer.start()
-        flatten(current, flatBytes, currentFlat)
+        flatten(current, flatBytes)
         stageTimer.recordSince(TinyPipelineStage.CURRENT_FLATTEN, flattenStarted)
         val spatialStarted = stageTimer.start()
-        rawMat.put(0, 0, current)
-        flatFloatMat.put(0, 0, currentFlat)
+        // uint8 -> float32 is exact, so a bulk put plus the native convertTo replaces the
+        // 622 KB float plane this loop used to materialise from Kotlin on every frame.
+        rawMat.put(0, 0, flatBytes)
+        rawMat.convertTo(flatFloatMat, org.opencv.core.CvType.CV_32F)
         org.opencv.imgproc.Imgproc.GaussianBlur(
             flatFloatMat,
             blur2Mat,
@@ -410,7 +553,7 @@ class TinyHeatmapNetBallDetector(
         blur2Mat.get(0, 0, blur2)
         blur5Mat.get(0, 0, blur5)
         for (index in 0 until PIXELS) {
-            val flat = currentFlat[index]
+            val flat = (flatBytes[index].toInt() and 0xff).toFloat()
             input[index] = flat / 255f
             input[PIXELS + index] = uint8Normalized((blur2[index] - flat) * 4f)
             input[2 * PIXELS + index] = uint8Normalized((flat - blur2[index]) * 4f)
@@ -419,11 +562,11 @@ class TinyHeatmapNetBallDetector(
         }
         stageTimer.recordSince(TinyPipelineStage.SPATIAL_FEATURES, spatialStarted)
 
-        // The parent model only consumes channels 0..4, and the motion channels 5..8 are read
-        // solely by extractPatch, i.e. at most TOP_K * PATCH_SIZE^2 samples per channel once
-        // candidates are known. Materialising them full-frame wrote 4 * PIXELS floats of which
-        // under 1% were ever read. Keep the per-lag residual instead and apply the signed
-        // uint8 mapping lazily in sampleMotion, which is bit-identical to the eager form.
+        // Channels 0..4 are the single-frame spatial block.  Channels 5..8 are the causal
+        // motion block and are now consumed by the parent itself, so they must be written into
+        // `input` here as well as kept as a residual for extractPatch/sampleMotion.
+        // uint8Normalized(residual * 4f) is exactly the mapping PC applies in
+        // preprocess_image, so the eager and lazy forms stay bit-identical.
         for (channelPair in 0 until MOTION_LAGS.size) {
             val lag = MOTION_LAGS[channelPair]
             // PC reads the exact source frame (frame_index - lag). CameraX may drop frames,
@@ -431,6 +574,8 @@ class TinyHeatmapNetBallDetector(
             val historyFrame = history.firstOrNull {
                 it.sourceFrameIndex == sourceFrameIndex - lag
             }
+            motionHistoryLookups += 1
+            if (historyFrame != null) motionHistoryHits += 1
             val alignmentStarted = stageTimer.start()
             val aligned = if (historyFrame == null) {
                 current
@@ -439,14 +584,40 @@ class TinyHeatmapNetBallDetector(
             }
             stageTimer.recordSince(TinyPipelineStage.HISTORY_ALIGNMENT, alignmentStarted)
             val motionStarted = stageTimer.start()
-            flatten(aligned, historyFlatBytes, historyFlat)
-            for (index in 0 until PIXELS) {
-                differenceScratch[index] = currentFlat[index] - historyFlat[index]
-            }
-            val median = differenceMedian(differenceScratch, PIXELS)
-            val residual = motionResidual[channelPair]
-            for (index in 0 until PIXELS) {
-                residual[index] = differenceScratch[index] - median
+            // Only the flattened bytes are needed: both operands are uint8 levels, so their
+            // difference is an exact integer and the float plane is pure overhead.
+            flatten(aligned, historyFlatBytes)
+            val median2 = IntegralMedian.ofByteDifferencesDoubled(
+                flatBytes,
+                historyFlatBytes,
+                PIXELS,
+                differenceHistogram
+            )
+            val positiveBase = (MOTION_CHANNEL_START + channelPair * 2) * PIXELS
+            val negativeBase = positiveBase + PIXELS
+            // `motionResidual` is read only by sampleMotion -> extractPatch -> the reranker.
+            // With the reranker disabled it would be a dead 622 KB store per lag per frame,
+            // so the hot loop is specialised rather than carrying a null check per pixel.
+            val residual = if (candidateReranker) motionResidual[channelPair] else null
+            // `residual * 4` is exactly `2 * value2`, so the channel mapping stays integral
+            // until the final divide and matches uint8Normalized(residual * 4f) bit for bit.
+            if (residual != null) {
+                for (index in 0 until PIXELS) {
+                    val value2 = 2 * ((flatBytes[index].toInt() and 0xff) -
+                        (historyFlatBytes[index].toInt() and 0xff)) - median2
+                    residual[index] = value2 * 0.5f
+                    val scaled = value2 * 2
+                    input[positiveBase + index] = scaledToUnit(scaled)
+                    input[negativeBase + index] = scaledToUnit(-scaled)
+                }
+            } else {
+                for (index in 0 until PIXELS) {
+                    val value2 = 2 * ((flatBytes[index].toInt() and 0xff) -
+                        (historyFlatBytes[index].toInt() and 0xff)) - median2
+                    val scaled = value2 * 2
+                    input[positiveBase + index] = scaledToUnit(scaled)
+                    input[negativeBase + index] = scaledToUnit(-scaled)
+                }
             }
             stageTimer.recordSince(TinyPipelineStage.MOTION_FEATURES, motionStarted)
         }
@@ -467,17 +638,23 @@ class TinyHeatmapNetBallDetector(
         }
     }
 
-    private fun flatten(source: ByteArray, destination: ByteArray, floatDestination: FloatArray) {
-        val globalMedian = byteMedian(source, 0, PIXELS)
+    /**
+     * Row-median flattened uint8 plane: `clamp(byte - rowMedian + globalMedian)`.
+     *
+     * An even sample count makes the medians half-integers, so they are carried **doubled**
+     * and the per-pixel clamp becomes integer arithmetic.  `floor(value2 / 2)` equals the
+     * previous `coerceIn(0f, 255f).toInt()` because the clamped value is non-negative, so the
+     * produced plane is bit-identical to the float version.
+     */
+    private fun flatten(source: ByteArray, destination: ByteArray) {
+        val globalMedian2 = IntegralMedian.ofBytesDoubled(source, 0, PIXELS, byteHistogram)
         for (row in 0 until ROI_HEIGHT) {
             val offset = row * ROI_WIDTH
-            val rowMedian = byteMedian(source, offset, ROI_WIDTH)
+            val rowMedian2 = IntegralMedian.ofBytesDoubled(source, offset, ROI_WIDTH, byteHistogram)
+            val bias = globalMedian2 - rowMedian2
             for (column in 0 until ROI_WIDTH) {
-                val value = ((source[offset + column].toInt() and 0xff) - rowMedian + globalMedian)
-                    .coerceIn(0f, 255f)
-                val byteValue = value.toInt()
-                destination[offset + column] = byteValue.toByte()
-                floatDestination[offset + column] = byteValue.toFloat()
+                val value2 = 2 * (source[offset + column].toInt() and 0xff) + bias
+                destination[offset + column] = (value2.coerceIn(0, 510) shr 1).toByte()
             }
         }
     }
@@ -563,18 +740,36 @@ class TinyHeatmapNetBallDetector(
         }
     }
 
-    private fun runBenchmarkSession(session: OrtSession) {
+    /**
+     * Benchmarks one ORT session on a synthetic 0.5f input.
+     *
+     * [channels] must come from the graph under test, not from the production parent: the
+     * shipped parent is 9-channel while the retained candidate assets are still 5-channel.
+     * Feeding the production buffer to a 5-channel graph is exactly how the harness broke in
+     * 2026-11 after the parent switched to 9 channels.
+     */
+    private fun runBenchmarkSession(session: OrtSession, channels: Int) {
+        val elements = channels * PIXELS
+        require(elements <= parentInputBuffer.capacity()) {
+            "Benchmark input of $channels channels does not fit the parent buffer"
+        }
         parentInputBuffer.clear()
-        parentInputBuffer.put(input, 0, PARENT_CHANNELS * PIXELS)
+        repeat(elements) { parentInputBuffer.put(0.5f) }
         parentInputBuffer.flip()
         val tensor = OnnxTensor.createTensor(
             environment,
             parentInputBuffer,
-            PARENT_SHAPE
+            longArrayOf(1, channels.toLong(), ROI_HEIGHT.toLong(), ROI_WIDTH.toLong())
         )
         tensor.use { image ->
             session.run(mapOf(PARENT_INPUT to image)).close()
         }
+    }
+
+    /** Channel count declared by [session]'s input, so legacy 5-channel assets stay benchable. */
+    private fun parentInputChannels(session: OrtSession): Int {
+        val info = session.inputInfo[PARENT_INPUT]?.info as? TensorInfo
+        return channelsFromShape(info?.shape)
     }
 
     private fun decodeCandidates(
@@ -619,6 +814,14 @@ class TinyHeatmapNetBallDetector(
         stageTimer: TinyPipelineStageTimer
     ) {
         if (pending.isEmpty()) return
+        // With the reranker disabled, `decodeCandidates` already left `logit` at
+        // `probabilityToLogit(baseScore)`, so `sigmoid(logit) == baseScore == parentScore`.
+        // That is exactly the state the ablation replayed, so leaving the list untouched
+        // here is the measured configuration, not an unmeasured shortcut.
+        if (!candidateReranker) {
+            candidates += pending
+            return
+        }
         val batchSession = batchedRerankerSession
         if (batchSession != null && pending.size == TOP_K) {
             val started = System.nanoTime()
@@ -689,6 +892,7 @@ class TinyHeatmapNetBallDetector(
     }
 
     private fun rerankScalar(candidate: Candidate, stageTimer: TinyPipelineStageTimer) {
+        val session = rerankerSession ?: error("Scalar reranker reached with the reranker disabled")
         val patchStarted = stageTimer.start()
         extractPatch(candidate.x, candidate.y)
         stageTimer.recordSince(TinyPipelineStage.PATCH_EXTRACTION, patchStarted)
@@ -711,7 +915,7 @@ class TinyHeatmapNetBallDetector(
         )
         val logit = patchTensor.use { patchValue ->
             scoreTensor.use { scoreValue ->
-                rerankerSession.run(
+                session.run(
                     mapOf(
                         RERANKER_PATCH_INPUT to patchValue,
                         RERANKER_SCORE_INPUT to scoreValue
@@ -781,20 +985,18 @@ class TinyHeatmapNetBallDetector(
     }
 
     /**
-     * Exact median of uint8 samples via a 256-bin histogram.
+     * [uint8Normalized] for a motion channel that is already an exact integer.
      *
-     * Numerically identical to sorting, because every input level is an integer in 0..255.
+     * Keeps the motion block in integer arithmetic; the result is identical because
+     * `coerceIn(0f, 255f).toInt()` on an integral value is just a clamp.
      */
-    private fun byteMedian(source: ByteArray, offset: Int, count: Int): Float =
-        IntegralMedian.ofBytes(source, offset, count, byteHistogram)
+    private fun scaledToUnit(scaled: Int): Float =
+        scaled.coerceIn(0, 255).toFloat() / 255f
 
     /**
      * Exact median of the lag difference, which is integral because both flattened operands
      * are whole uint8 levels.
      */
-    private fun differenceMedian(values: FloatArray, count: Int): Float =
-        IntegralMedian.ofDifferences(values, count, differenceHistogram)
-
     private fun probabilityToLogit(probability: Float): Float {
         val clipped = probability.coerceIn(1e-5f, 1f - 1e-5f)
         return kotlin.math.ln(clipped / (1f - clipped))
@@ -810,7 +1012,7 @@ class TinyHeatmapNetBallDetector(
         OrtTinyHeatmapParentBackend(
             environment = environment,
             modelBytes = appContext.assets.open(PARENT_MODEL_FILE).use { it.readBytes() },
-            inputShape = PARENT_SHAPE,
+            inputShape = parentInputShape,
             heatmapSize = HEATMAP_PIXELS,
             offsetSize = HEATMAP_PIXELS * 2,
             threads = cpuInferenceThreads.coerceAtLeast(1),
@@ -858,8 +1060,20 @@ class TinyHeatmapNetBallDetector(
             }
             .getOrNull()
 
-    private fun createNcnnParent(context: Context): TinyHeatmapParentBackend? =
-        runCatching {
+    private fun createNcnnParent(context: Context): TinyHeatmapParentBackend? {
+        // The shipped ncnn asset is a 5-channel graph.  The parent input is now 9 channels,
+        // so this backend cannot serve it; skip it explicitly instead of handing NCNN a
+        // tensor whose channel count its graph cannot accept.  The chain stays
+        // QNN HTP -> ORT CPU, which is what production already ran.
+        if (PARENT_CHANNELS != NCNN_PARENT_CHANNELS) {
+            Log.i(
+                TAG,
+                "NCNN parent skipped: shipped asset is $NCNN_PARENT_CHANNELS-channel, " +
+                    "parent is $PARENT_CHANNELS-channel"
+            )
+            return null
+        }
+        return runCatching {
             NcnnTinyHeatmapNet(
                 context = context,
                 useVulkan = true,
@@ -878,6 +1092,7 @@ class TinyHeatmapNetBallDetector(
                 Log.w(TAG, "NCNN Vulkan parent unavailable; using FP32 CPU fallback", it)
             }
             .getOrNull()
+    }
 
     private fun updateBackendIdentity(backend: TinyHeatmapParentBackend) {
         lastParentBackendName = backend.backendName
@@ -927,7 +1142,7 @@ class TinyHeatmapNetBallDetector(
             Log.w(TAG, "Unable to close batched candidate reranker session", it)
         }
         batchedRerankerSession = null
-        runCatching { rerankerSession.close() }.onFailure {
+        runCatching { rerankerSession?.close() }.onFailure {
             Log.w(TAG, "Unable to close candidate reranker session", it)
         }
         rawMat.release()
@@ -945,7 +1160,7 @@ class TinyHeatmapNetBallDetector(
 
     companion object {
         private const val TAG = "TinyHeatmapNet"
-        private const val PARENT_MODEL_FILE = "tinyheatmapnet_final.onnx"
+        private const val PARENT_MODEL_FILE = "tinyheatmapnet_causal9_heads.onnx"
         private const val PRODUCTION_NCNN_PARAM_FILE = "tinyheatmapnet_final.ncnn.param"
         private const val PRODUCTION_NCNN_MODEL_FILE = "tinyheatmapnet_final.ncnn.bin"
         private const val RERANKER_MODEL_FILE = "candidate_reranker_final.onnx"
@@ -954,7 +1169,16 @@ class TinyHeatmapNetBallDetector(
         private const val ROI_HEIGHT = TubeRoiSampler.OUTPUT_HEIGHT
         private const val PIXELS = ROI_WIDTH * ROI_HEIGHT
         private const val INPUT_CHANNELS = 9
-        private const val PARENT_CHANNELS = 5
+
+        /**
+         * The parent now consumes the whole 9-channel causal block: 5 spatial channels plus
+         * 2 lags x 2 signs of aligned frame difference. Model: `tinyheatmapnet_causal9.onnx`
+         * (ORT/NNAPI CPU fallback) and `tinyheatmapnet_causal9_qnn_context.bin` (QNN HTP FP16,
+         * compiled by AI Hub, 145/145 layers on NPU).
+         */
+        private const val PARENT_CHANNELS = 9
+        /** Channel count baked into the shipped ncnn asset, used to skip it for a 9-channel parent. */
+        private const val NCNN_PARENT_CHANNELS = 5
         private const val MOTION_CHANNEL_START = 5
         private val MOTION_LAGS = intArrayOf(1, 3)
         private const val OUTPUT_STRIDE = 2f
@@ -972,7 +1196,13 @@ class TinyHeatmapNetBallDetector(
             PATCH_SIZE.toLong()
         )
         private val RERANKER_BATCH_SCORE_SHAPE = longArrayOf(TOP_K.toLong())
-        private const val HISTORY_CAPACITY = 3
+        /**
+         * The camera thread stabilises every capture, so three entries are enough while the
+         * analyzer runs on every frame. The analyzer can skip frames under load, and one skip
+         * would drop lag-1 for the next capture; six entries keep both lags reachable through
+         * a short burst of skipped captures at ~1 MB of retained ROI bytes.
+         */
+        private const val HISTORY_CAPACITY = 6
         /**
          * Threads for the single ROI inference.
          *
@@ -985,10 +1215,43 @@ class TinyHeatmapNetBallDetector(
         private const val MAX_INFERENCE_THREADS = 4
 
         internal fun inferenceThreadCount(
-            availableProcessors: Int = Runtime.getRuntime().availableProcessors()
-        ): Int = (availableProcessors / 2).coerceIn(1, MAX_INFERENCE_THREADS)
+            availableProcessors: Int = Runtime.getRuntime().availableProcessors(),
+            fastCores: Int = CpuAffinity.fastCoreCount
+        ): Int {
+            // Three pipelines share the big cluster: the camera analyzer (ROI stabilisation,
+            // scale sampling), the tube detector session, and this parent session.  On a
+            // four-fast-core phone every one of them claiming `cores / 2` oversubscribes the
+            // cluster and they thrash each other: measured on a Dimensity 1000+ (2026-11-15)
+            // the parent ran 287 ms inside the pipeline against 44 ms in isolation.  Reserve
+            // cores for the camera phase instead of taking half of everything.  Devices with
+            // six or more fast cores keep the old four-thread cap.
+            val cap = if (fastCores in 1..MAX_INFERENCE_THREADS) {
+                (fastCores - RESERVED_FAST_CORES).coerceAtLeast(1)
+            } else {
+                MAX_INFERENCE_THREADS
+            }
+            return (availableProcessors / 2).coerceIn(1, cap)
+        }
+        private const val RESERVED_FAST_CORES = 2
         private const val MAX_HISTORY_GAP_NS = 700_000_000L
-        private val PARENT_SHAPE = longArrayOf(1, 5, ROI_HEIGHT.toLong(), ROI_WIDTH.toLong())
+        // Derived from PARENT_CHANNELS on purpose: when the parent moved to 9 causal channels
+        // this stayed hard-coded at 5 and broke every CPU fallback (and every benchmark) with
+        // "Expected 778240 parent input values, got 1400832".  Never hard-code the channel
+        // count here again.  Internal so the contract test can lock it to the shipped ONNX.
+        internal val parentInputShape =
+            longArrayOf(1, PARENT_CHANNELS.toLong(), ROI_HEIGHT.toLong(), ROI_WIDTH.toLong())
+
+        /**
+         * Channel count implied by a model input shape.
+         *
+         * Benchmark sessions must match the graph they load: the shipped parent is 9-channel
+         * while the retained candidate assets are 5-channel.  Unknown/incomplete shapes fall
+         * back to the legacy count so a malformed report cannot silently allocate the wrong
+         * tensor.
+         */
+        internal fun channelsFromShape(shape: LongArray?): Int =
+            shape?.getOrNull(1)?.toInt()?.takeIf { it > 0 } ?: NCNN_PARENT_CHANNELS
+
         private val RERANKER_PATCH_SHAPE = longArrayOf(1, 9, PATCH_SIZE.toLong(), PATCH_SIZE.toLong())
         private val RERANKER_SCORE_SHAPE = longArrayOf(1)
         private const val PARENT_INPUT = "image"

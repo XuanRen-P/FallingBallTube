@@ -8,14 +8,21 @@ object CpuThreadTuning {
     /**
      * Zero represents ONNX Runtime's automatic pool. The explicit values cover small,
      * medium, and all-core pools without benchmarking every integer on larger devices.
+     *
+     * [maxThreads] caps the pool on devices whose whole fast cluster is four cores or fewer.
+     * When the budget is binding, the automatic pool (0) is dropped: ORT's auto sizing would
+     * take every core back and undo the cap.
      */
-    fun candidates(availableProcessors: Int): List<Int> {
+    fun candidates(availableProcessors: Int, maxThreads: Int = Int.MAX_VALUE): List<Int> {
         val cores = availableProcessors.coerceAtLeast(1)
-        val explicit = if (cores == 1) listOf(1) else listOf(2, 3, 4, 6, 8)
+        val limit = maxThreads.coerceIn(1, cores)
+        val explicit = buildList {
+            if (cores == 1) add(1) else listOf(2, 3, 4, 6, 8).filterTo(this) { it <= limit }
+            if (limit !in this) add(limit)
+        }
         return buildList {
-            add(0)
-            explicit.filterTo(this) { it <= cores }
-            if (cores !in this) add(cores)
+            if (limit == cores) add(0)
+            addAll(explicit)
         }.distinct()
     }
 

@@ -278,7 +278,9 @@ internal class FixedPreRollBuffer<T>(private val capacity: Int) {
 
 internal object TrackingDiagnosticRoiBudget {
     const val PER_SESSION_BYTES = 96L * 1024L * 1024L
-    const val TOTAL_BYTES = 384L * 1024L * 1024L
+
+    /** Total ROI diagnostics budget kept on device (oldest finished sessions evicted first). */
+    const val TOTAL_BYTES = 4096L * 1024L * 1024L
 
     fun availableForSession(existingBytes: Long): Long = minOf(
         PER_SESSION_BYTES,

@@ -1,5 +1,7 @@
 package com.cupet.fallingball.ui
 
+import com.cupet.fallingball.analysis.HistoryMarkColor
+
 /**
  * Light appearance tokens. Names describe the role a color plays, not its hue.
  * Keeping the palette here makes custom Views follow the same hierarchy as XML
@@ -11,6 +13,31 @@ object UiColors {
     const val SURFACE_CONTAINER: Int = 0xFFEDF2F3.toInt()
     const val SURFACE_CONTAINER_HIGH: Int = 0xFFE4EAEC.toInt()
     const val SURFACE_TINT: Int = 0xFFF9FBFB.toInt()
+
+    /**
+     * Low-saturation row labels for measurement history. Every swatch stays light enough
+     * for [ON_SURFACE] text (contrast is asserted in `HistoryMarkColorsTest`).
+     */
+    const val HISTORY_MARK_BLUE: Int = 0xFFDCE7F2.toInt()
+    const val HISTORY_MARK_GREEN: Int = 0xFFDDEBDF.toInt()
+    const val HISTORY_MARK_YELLOW: Int = 0xFFF1ECD5.toInt()
+    const val HISTORY_MARK_PINK: Int = 0xFFF0DEE2.toInt()
+    const val HISTORY_MARK_PURPLE: Int = 0xFFE6DEF0.toInt()
+    const val HISTORY_MARK_ORANGE: Int = 0xFFF1E4D6.toInt()
+
+    private val HISTORY_MARK_BACKGROUNDS: Map<HistoryMarkColor, Int> = mapOf(
+        HistoryMarkColor.BLUE to HISTORY_MARK_BLUE,
+        HistoryMarkColor.GREEN to HISTORY_MARK_GREEN,
+        HistoryMarkColor.YELLOW to HISTORY_MARK_YELLOW,
+        HistoryMarkColor.PINK to HISTORY_MARK_PINK,
+        HistoryMarkColor.PURPLE to HISTORY_MARK_PURPLE,
+        HistoryMarkColor.ORANGE to HISTORY_MARK_ORANGE
+    )
+
+    /** Row background for a user label; null means "no label" (transparent row). */
+    fun historyMarkBackground(mark: HistoryMarkColor?): Int? =
+        mark?.let(HISTORY_MARK_BACKGROUNDS::get)
+
 
     const val ON_SURFACE: Int = 0xFF18252B.toInt()
     const val ON_SURFACE_VARIANT: Int = 0xFF4B5B63.toInt()

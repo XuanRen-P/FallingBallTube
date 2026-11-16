@@ -169,13 +169,29 @@ class AliyunResponsesAdapter(
             "response.completed" -> AliyunStreamEvent.Completed(
                 json.optJSONObject("response") ?: json
             )
-            "response.failed", "response.incomplete" -> {
+            "response.failed" -> {
                 val response = json.optJSONObject("response")
                 val error = response?.optJSONObject("error") ?: json.optJSONObject("error")
                 throw AliyunResponseException(sanitize(
                     error?.optString("message")?.take(MAX_ERROR_BODY_CHARS)
                         ?.ifBlank { null } ?: "Alibaba Cloud response failed"
                 ))
+            }
+            "response.incomplete" -> {
+                val response = json.optJSONObject("response")
+                val reason = response?.optJSONObject("incomplete_details")
+                    ?.optString("reason")?.takeIf(String::isNotBlank)
+                    ?: json.optJSONObject("incomplete_details")
+                        ?.optString("reason")?.takeIf(String::isNotBlank)
+                val error = response?.optJSONObject("error") ?: json.optJSONObject("error")
+                val message = error?.optString("message")?.takeIf(String::isNotBlank)
+                    ?: when (reason) {
+                        "max_output_tokens" -> "模型输出达到长度上限，本轮未能完成"
+                        "content_filter" -> "模型输出被内容安全策略中断"
+                        null -> "模型未能完成本次回答"
+                        else -> "模型未能完成本次回答（$reason）"
+                    }
+                throw AliyunResponseException(sanitize(message.take(MAX_ERROR_BODY_CHARS)))
             }
             else -> null
         }

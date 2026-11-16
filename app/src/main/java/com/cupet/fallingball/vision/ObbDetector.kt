@@ -88,7 +88,9 @@ class ObbDetector(
      */
     init {
         val fallbackThreads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 4)
-        activeThreads = cachedThreads(initialProfile) ?: fallbackThreads
+        // A stored choice from an earlier run must not exceed the current budget: the phone
+        // may have been tuned before the budget existed.
+        activeThreads = clampThreads(cachedThreads(initialProfile) ?: fallbackThreads)
         session = createSession(activeThreads)
         inputName = session.inputNames.first()
         Log.d(
@@ -302,7 +304,10 @@ class ObbDetector(
 
     private fun tuneThreads(profile: ModelProfile, input: FloatBuffer) {
         if (cachedThreads(profile) != null || tuningCancelled()) return
-        val candidates = CpuThreadTuning.candidates(Runtime.getRuntime().availableProcessors())
+        val candidates = CpuThreadTuning.candidates(
+            Runtime.getRuntime().availableProcessors(),
+            threadBudget()
+        )
         val results = ArrayList<CpuThreadTuning.Benchmark>(candidates.size)
         for (threads in candidates) {
             if (tuningCancelled()) return
@@ -377,8 +382,29 @@ class ObbDetector(
         closed || Thread.currentThread().isInterrupted
 
     private fun applyCachedThreads(profile: ModelProfile) {
-        val cached = cachedThreads(profile) ?: return
+        val cached = clampThreads(cachedThreads(profile) ?: return)
         if (cached != activeThreads) replaceSession(cached)
+    }
+
+    /**
+     * Thread budget for this graph.
+     *
+     * The tube detector shares the fast cluster with the camera analyzer and the parent
+     * session.  On a phone whose whole fast cluster is four cores, each pipeline taking half
+     * of every core made all of them three to six times slower (measured on a Dimensity 1000+
+     * on 2026-11-15: parent 44 ms isolated vs 287 ms inside the pipeline).  The budget leaves
+     * two cores for the others; wide-cluster devices keep the historical behaviour.
+     */
+    private fun threadBudget(): Int {
+        val fastCores = CpuAffinity.fastCoreCount
+        return if (fastCores in 1..4) (fastCores - 2).coerceAtLeast(1) else Int.MAX_VALUE
+    }
+
+    /** Clamps a stored/auto thread choice to [threadBudget]; 0 (ORT auto) becomes the budget. */
+    private fun clampThreads(threads: Int): Int {
+        val budget = threadBudget()
+        if (budget == Int.MAX_VALUE) return threads
+        return if (threads <= 0) budget else threads.coerceAtMost(budget)
     }
 
     private fun replaceSession(threads: Int) {

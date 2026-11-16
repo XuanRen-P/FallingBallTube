@@ -11,7 +11,8 @@ gradle.taskGraph.whenReady {
         throw GradleException(
             "${forbiddenDeviceTest.path} is blocked because it may uninstall " +
                 "com.cupet.fallingball and erase real-device data. " +
-                "See the device data protection note in README.md."
+                "Use the manual instrumentation workflow in " +
+                "docs/ANDROID_DEVICE_TESTING_INCIDENT_2026-08-14.md."
         )
     }
 }

@@ -19,6 +19,11 @@ internal object CpuAffinity {
     @Volatile
     private var attempted = false
 
+    /** Fast-core count from the last successful pin, or 0 when unknown. */
+    @Volatile
+    var fastCoreCount: Int = 0
+        private set
+
     /** Returns the number of fast cores pinned to, or 0 when unavailable. */
     @Synchronized
     fun pinProcessToFastCores(): Int {
@@ -28,6 +33,7 @@ internal object CpuAffinity {
             System.loadLibrary("fallingball_native")
             val fastCores = nativePinProcessToFastCores()
             if (fastCores > 0) {
+                fastCoreCount = fastCores
                 Log.i(TAG, "CpuAffinity: process pinned to $fastCores fast cores")
             }
             fastCores

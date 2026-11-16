@@ -36,6 +36,17 @@ data class TinyHeatmapRuntimeDiagnostics(
     val rerankerMs: Float = 0f,
     /** Parent + candidate decode/rerank time, excluding input construction. */
     val totalMs: Float = 0f,
+    /**
+     * Fraction of lag-1/lag-3 motion channels that located their exact source frame.
+     *
+     * Channels 5..8 of the causal parent are differences against the frames
+     * `sourceFrameIndex - 1` and `- 3`. CameraX drops frames, and a lag whose exact
+     * source frame is missing falls back to "no motion" — which silently changes what
+     * the parent sees rather than merely slowing it down. A value below 1.0 therefore
+     * means the deployed model is consuming a degraded causal input, so this is
+     * reported as a first-class metric instead of being inferred from the drop rate.
+     */
+    val motionHistoryHitRate: Float = 1f,
     val parentLatencyStats: TinyHeatmapLatencyStats = TinyHeatmapLatencyStats()
 ) {
     /** The exact production GPU claim gate used by logs and tests. */

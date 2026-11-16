@@ -38,7 +38,7 @@
 namespace {
 
 constexpr uint32_t kInputBatch = 1;
-constexpr uint32_t kInputChannels = 5;
+constexpr uint32_t kInputChannels = 9;
 constexpr uint32_t kInputHeight = 1024;
 constexpr uint32_t kInputWidth = 152;
 constexpr uint32_t kHeatmapHeight = 512;
@@ -228,14 +228,44 @@ void applyHtpBurstMode() {
          powerStatus == QNN_SUCCESS ? "accepted" : "rejected");
 }
 
-// Maps ro.soc.model to the QNN_SOC_MODEL enum for the devices we ship
-// HTP context binaries for.  Returns 0 (UNKNOWN) for anything else.
-uint32_t socModelFromSystemProperties() {
+// HTP architecture + SoC identity for the platforms we ship context binaries for.
+// A context binary is bound to one Hexagon arch: a v75 binary fails to load on a v73
+// device (measured on a Xiaomi 13 / SM8550: loadRemoteSymbols err 4000 -> transport
+// 14001 -> INVALID_CONFIG), so the offline platform information has to describe the
+// device it is actually running on rather than a hard-coded 8 Gen 3.
+struct SocPlatform {
+    uint32_t socModel;
+    QnnHtpDevice_Arch_t arch;
+    uint32_t vtcmMb;
+};
+
+// Maps ro.soc.model to (soc model id, HTP arch).  OEM SKU suffixes such as the Galaxy
+// "-AC" part are ignored: the HTP arch is the ABI that decides binary compatibility.
+bool socPlatformFromSystemProperties(SocPlatform* out) {
     char value[PROP_VALUE_MAX] = {0};
     int length = __system_property_get("ro.soc.model", value);
     const std::string socModel(length > 0 ? value : "");
-    if (socModel == "SM8650") return QNN_SOC_MODEL_SM8650;  // Snapdragon 8 Gen 3
-    return QNN_SOC_MODEL_UNKNOWN;
+    struct Entry {
+        const char* prefix;
+        uint32_t socModel;
+        QnnHtpDevice_Arch_t arch;
+    };
+    static const Entry kEntries[] = {
+        {"SM8450", QNN_SOC_MODEL_SM8450, QNN_HTP_DEVICE_ARCH_V69},  // 8 Gen 1
+        {"SM8475", QNN_SOC_MODEL_SM8475, QNN_HTP_DEVICE_ARCH_V69},  // 8+ Gen 1
+        {"SM8550", QNN_SOC_MODEL_SM8550, QNN_HTP_DEVICE_ARCH_V73},  // 8 Gen 2
+        {"SM8635", QNN_SOC_MODEL_SM8635, QNN_HTP_DEVICE_ARCH_V73},  // 8s Gen 3
+        {"SM8650", QNN_SOC_MODEL_SM8650, QNN_HTP_DEVICE_ARCH_V75},  // 8 Gen 3
+        {"SM8750", QNN_SOC_MODEL_SM8750, QNN_HTP_DEVICE_ARCH_V79},  // 8 Elite (incl. -AC)
+    };
+    for (const Entry& entry : kEntries) {
+        if (socModel.rfind(entry.prefix, 0) != 0) continue;
+        out->socModel = entry.socModel;
+        out->arch = entry.arch;
+        out->vtcmMb = 8;
+        return true;
+    }
+    return false;
 }
 
 // Second-chance device creation: builds an explicit offline platform info so
@@ -244,19 +274,19 @@ uint32_t socModelFromSystemProperties() {
 // immediately before QnnDevice_create failed).  Only reached when the normal
 // auto-detecting deviceCreate failed.
 bool createDeviceWithOfflineInfo(Qnn_LogHandle_t log, Qnn_DeviceHandle_t* device) {
-    const uint32_t socModel = socModelFromSystemProperties();
-    if (socModel == QNN_SOC_MODEL_UNKNOWN) {
+    SocPlatform platform{};
+    if (!socPlatformFromSystemProperties(&platform)) {
         LOGE("QnnDevice_create failed and no offline SoC mapping is available "
              "for this device");
         return false;
     }
     QnnHtpDevice_DeviceInfoExtension_t htpExtension{};
     htpExtension.devType = QNN_HTP_DEVICE_TYPE_ON_CHIP;
-    htpExtension.onChipDevice.vtcmSize = 8;  // MiB, HTP v75 VTCM size
-    htpExtension.onChipDevice.socModel = socModel;
+    htpExtension.onChipDevice.vtcmSize = platform.vtcmMb;
+    htpExtension.onChipDevice.socModel = platform.socModel;
     htpExtension.onChipDevice.signedPdSupport = false;
     htpExtension.onChipDevice.dlbcSupport = true;
-    htpExtension.onChipDevice.arch = QNN_HTP_DEVICE_ARCH_V75;
+    htpExtension.onChipDevice.arch = platform.arch;
 
     QnnDevice_HardwareDeviceInfo_t hardwareInfo = QNN_DEVICE_HARDWARE_DEVICE_INFO_INIT;
     hardwareInfo.v1.deviceId = 0;  // measured: platform supports device ids 0..1
@@ -279,7 +309,8 @@ bool createDeviceWithOfflineInfo(Qnn_LogHandle_t log, Qnn_DeviceHandle_t* device
     deviceConfig.hardwareInfo = &platformInfo;
     const QnnDevice_Config_t* deviceConfigs[] = {&deviceConfig, nullptr};
 
-    LOGI("Retrying QnnDevice_create with offline platform info (socModel=%u)", socModel);
+    LOGI("Retrying QnnDevice_create with offline platform info (socModel=%u arch=%d)",
+         platform.socModel, static_cast<int>(platform.arch));
     const auto& iface = g_state.provider->QNN_INTERFACE_VER_NAME;
     const Qnn_ErrorHandle_t status = iface.deviceCreate(log, deviceConfigs, device);
     if (QNN_SUCCESS != status) {

@@ -1,7 +1,10 @@
 package com.cupet.fallingball.camera
 
 import android.content.Context
+import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
 import android.util.Log
 import android.util.Range
 import android.util.Size
@@ -28,6 +31,7 @@ import com.cupet.fallingball.analysis.BallSample
 import com.cupet.fallingball.analysis.FallFrameObservation
 import com.cupet.fallingball.analysis.FallSession
 import com.cupet.fallingball.analysis.FallTrackingGate
+import com.cupet.fallingball.analysis.VelocityEstimator
 import com.cupet.fallingball.ui.AnalysisResolution
 import com.cupet.fallingball.vision.AxialSampler
 import com.cupet.fallingball.vision.BallEndReason
@@ -425,7 +429,9 @@ open class MeasurementFrameProcessor(
         TubeRoiSampler.OUTPUT_WIDTH * TubeRoiSampler.OUTPUT_HEIGHT
     ).order(ByteOrder.nativeOrder())
     /** Owned by the camera analysis executor; worker snapshots contain immutable byte arrays. */
-    private val tinyInputHistory = TinyHeatmapInputHistory(capacity = 3)
+    // Must match TinyHeatmapNetBallDetector.HISTORY_CAPACITY so every retained capture
+    // can actually reach the worker; see the note on skipped captures there.
+    private val tinyInputHistory = TinyHeatmapInputHistory(capacity = 6)
     /** Counts successful model work separately from camera callbacks and queue replacements. */
     private val tinyThroughput = TinyHeatmapThroughputTracker()
     private val tinyRuntimeRef = AtomicReference(TinyHeatmapRuntimeDiagnostics())
@@ -437,6 +443,8 @@ open class MeasurementFrameProcessor(
         val candidates: List<TinyHeatmapSequenceCandidate>
     )
     private val tinySequenceFrames = ArrayList<TinySequenceFrameRecord>(2048)
+    private val causalFallbackObservations = ArrayList<FallFrameObservation>(2048)
+    private val causalFallbackLock = Any()
     private var tinySourceFrameIndex = -1
     private var tinyCaptureFrameIndex = -1
     private var tinyLastCaptureTimestampNs = 0L
@@ -445,6 +453,7 @@ open class MeasurementFrameProcessor(
     private fun resetTinySequenceState() {
         synchronized(tinySequenceLock) {
             tinySequenceFrames.clear()
+            synchronized(causalFallbackLock) { causalFallbackObservations.clear() }
             tinySourceFrameIndex = -1
             tinyCaptureFrameIndex = -1
             tinyLastCaptureTimestampNs = 0L
@@ -569,6 +578,7 @@ open class MeasurementFrameProcessor(
 
     private var sampleFps = 0f
     private var lastSampleNs = 0L
+    private val cameraRate = CameraRateDiagnostics()
     private var temporalStepFps = 0f
     private var lastTemporalStepNs = 0L
     private var lastPerformanceLogElapsedNs = 0L
@@ -608,6 +618,23 @@ open class MeasurementFrameProcessor(
             }
         }.onFailure { failure ->
             Log.e(TINY_BENCHMARK_TAG, "status=error unable to schedule", failure)
+        }
+    }
+
+    fun benchmarkTinyPreprocess() {
+        if (closed.get()) return
+        pause()
+        benchmarkExecutor.execute {
+            awaitTemporalWorkerDrainForBenchmark()
+            runCatching {
+                TinyHeatmapNetBallDetector(context).use { detector ->
+                    detector.benchmarkPreprocessResult(iterations = 12)
+                }
+            }
+                .onSuccess { result -> logTinyBenchmark(result, "preprocess") }
+                .onFailure { failure ->
+                    Log.e(TINY_BENCHMARK_TAG, "status=error backend=preprocess", failure)
+                }
         }
     }
 
@@ -849,6 +876,7 @@ open class MeasurementFrameProcessor(
             temporalResultUsage.reset()
             temporalStepFps = 0f
             lastTemporalStepNs = 0L
+            cameraRate.reset()
         }
     }
 
@@ -1220,6 +1248,7 @@ open class MeasurementFrameProcessor(
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
         if (requestTargetFps) requestAnalysisFrameRate(builder)
         if (enableStab) enableStabilization(builder)
+        observeAppliedFrameRate(builder)
 
         val analysis = builder.build()
         analysis.setAnalyzer(analysisExecutor) { proxy ->
@@ -1236,7 +1265,14 @@ open class MeasurementFrameProcessor(
                 image.close()
                 return@setAnalyzer
             }
-            analyzeFrame(image, bindingRegistrationToken)
+            val frameStartNs = System.nanoTime()
+            cameraRate.onFrameStart(image.imageInfo.timestamp, frameStartNs)
+            try {
+                analyzeFrame(image, bindingRegistrationToken)
+            } finally {
+                val frameEndNs = System.nanoTime()
+                cameraRate.onFrameEnd(frameEndNs - frameStartNs, frameEndNs)
+            }
         }
         return analysis
     }
@@ -1301,6 +1337,20 @@ open class MeasurementFrameProcessor(
                 val trackedResult = trackerState.result
                     ?.takeIf { it.profileGeneration == generation }
                 val trackedAxis = trackerState.axis.takeIf { trackedResult != null }
+                // Tube geometry is static, so re-detecting it is pure overhead once it is
+                // locked.  On a device where one OBB inference costs hundreds of milliseconds,
+                // the fixed 200 ms interval keeps a whole core busy and starves the ball
+                // pipeline (Dimensity 1000+: 341 ms OBB at 4 fps tiny throughput).  Never
+                // refresh faster than two measured inference periods; fast devices
+                // (~84 ms) keep their profile interval unchanged.
+                val measuredObbMs = trackerState.result
+                    ?.inferenceMs
+                    ?.takeIf { it.isFinite() && it > 0f }
+                    ?: 0f
+                val obbIntervalNs = maxOf(
+                    loadProfile.yoloIntervalNs,
+                    (2f * measuredObbMs * 1_000_000f).toLong()
+                )
                 val obbDecision = obbRefreshPolicy.decide(
                     frameTimestampNs = tsNs,
                     lastDetectionTimestampNs = trackerState.detectionTimestampNs,
@@ -1310,7 +1360,7 @@ open class MeasurementFrameProcessor(
                             loadProfile.yoloCooldownNs
                         ),
                     hasTrackedAxis = trackedAxis != null,
-                    refreshIntervalNs = loadProfile.yoloIntervalNs,
+                    refreshIntervalNs = obbIntervalNs,
                     maxTrackedAxisAgeNs = loadProfile.maxTrackedAxisAgeNs
                 )
                 analyzerTimer.recordSince(TinyPipelineStage.TRACK_AND_POLICY, trackStartedNs)
@@ -1573,6 +1623,37 @@ open class MeasurementFrameProcessor(
         }
     }
 
+    /**
+     * Records the frame rate the pipeline actually runs at, not the one we asked for.
+     *
+     * Stabilization and vendor overrides can rewrite `CONTROL_AE_TARGET_FPS_RANGE`, and a 20 fps
+     * report that turns out to be our own 49 ms analyzer holding the ImageProxy is a completely
+     * different problem from a sensor stuck at 20 fps. The 1 Hz diagnostics line prints both.
+     */
+    @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
+    private fun observeAppliedFrameRate(builder: ImageAnalysis.Builder) {
+        try {
+            Camera2Interop.Extender(builder).setSessionCaptureCallback(
+                object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureCompleted(
+                        session: CameraCaptureSession,
+                        request: CaptureRequest,
+                        result: TotalCaptureResult
+                    ) {
+                        val range = result.get(CaptureResult.CONTROL_AE_TARGET_FPS_RANGE)
+                        cameraRate.onCaptureResult(
+                            range?.lower,
+                            range?.upper,
+                            result.get(CaptureResult.SENSOR_FRAME_DURATION)
+                        )
+                    }
+                }
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "applied frame rate probe not attached: ${t.message}")
+        }
+    }
+
     @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
     private fun <T> enableStabilization(builder: androidx.camera.core.ExtendableBuilder<T>) {
         try {
@@ -1773,7 +1854,23 @@ open class MeasurementFrameProcessor(
         // 17 bands (and three luma probes per sample) here only blocks the camera analyzer;
         // retain the path while an explicit debug capture is active, but do not pay for it
         // during normal TinyHeatmapNet operation.
-        val denseSamplingEnabled = temporalDebugCaptureRecorder.capturesDenseDiagnostics
+        //
+        // "an explicit debug capture is active" used to mean `capturesDenseDiagnostics`,
+        // which is `detailRef == FULL` -- and `startTrackingSession`, which runs on *every*
+        // measurement, sets exactly that. So the sampler ran on every frame of every
+        // measurement, and so did `denseBallTracker.propose`, even though `propose` returns
+        // null unconditionally when `outputEnabled` is false (DenseRegisteredBallTracker
+        // line 254) and that flag has been hard-coded false here since TinyHeatmapNet became
+        // the sole detector. Nothing downstream ever read the result.
+        //
+        // Measured cost on an SM8650: `dense_diagnostics_ms` p50 24.2 ms per frame -- the
+        // largest single stage in the pipeline, nearly four times the parent inference.
+        // Gating the sampling on the same flag that gates the output makes the scaffold
+        // genuinely dormant rather than merely ignored. Set the flag true to restore the
+        // whole path for tracker debugging.
+        val denseOutputEnabled = false
+        val denseSamplingEnabled =
+            denseOutputEnabled && temporalDebugCaptureRecorder.capturesDenseDiagnostics
         val denseSamplingStartedNs = stageTimer.start()
         val denseSignalLength = if (denseSamplingEnabled) {
             ensureDenseBandCapacity(axis.lengthPx.toInt() + 64)
@@ -1919,10 +2016,7 @@ open class MeasurementFrameProcessor(
 
         val denseGateStatus = fallTrackingGate.status()
         val denseMotionSeedAvailable = denseGateStatus.hasUsableMotionTrajectory
-        // TinyHeatmapNet is now the sole production ball detector. Keep the dense tracker
-        // disabled as a diagnostic scaffold so it cannot override the requested live preview
-        // or append a second, non-PC candidate stream to the session.
-        val denseOutputEnabled = false
+        // `denseOutputEnabled` is declared above, next to the sampler it now also gates.
         val denseDiagnosticsStartedNs = stageTimer.start()
         val denseDetection = if (denseSamplingEnabled && denseSignalLength > 0) {
             denseBallTracker.propose(
@@ -2591,9 +2685,9 @@ open class MeasurementFrameProcessor(
                     "yoloMs=%.1f pre=%.1f ort=%.1f post=%.1f queue=%.1f " +
                     "classical=%.1ffps tinyBackend=%s/%s verified=%s gpu=%s placement=%s tinyFps=%.1f " +
                     "tinyWork=%d/%d/%d/%d tinyMs=%s parentP50=%s parentP95=%s " +
-                    "tinyPre=%s tinyParent=%s tinyPost=%s tinyRerank=%s " +
+                    "tinyPre=%s tinyParent=%s tinyPost=%s tinyRerank=%s motionHit=%.2f " +
                     "score=%s threshold=%.2f inferMs=%s ageMs=%s " +
-                    "ruler=%s gate=%s reject=%s recorded=%d",
+                    "ruler=%s gate=%s reject=%s recorded=%d cam=%s",
                 load.level,
                 thermal?.signal ?: ThermalSignal.NORMAL,
                 thermal?.batteryTemperatureC?.let { "%.1f".format(Locale.ROOT, it) } ?: "unknown",
@@ -2629,6 +2723,7 @@ open class MeasurementFrameProcessor(
                     ?.let { "%.1f".format(Locale.ROOT, it) } ?: "none",
                 ball?.runtime?.rerankerMs
                     ?.let { "%.1f".format(Locale.ROOT, it) } ?: "none",
+                ball?.runtime?.motionHistoryHitRate ?: 1f,
                 ball?.score?.let { "%.3f".format(Locale.ROOT, it) } ?: "none",
                 ball?.threshold ?: TinyHeatmapSequenceDecoder.CANDIDATE_THRESHOLD,
                 ball?.inferenceMs?.let { "%.1f".format(Locale.ROOT, it) } ?: "none",
@@ -2636,7 +2731,8 @@ open class MeasurementFrameProcessor(
                 result.scale?.state ?: "none",
                 ball?.gate?.phase ?: "none",
                 ball?.gate?.lastRejection ?: "none",
-                ball?.recordedSamples ?: 0
+                ball?.recordedSamples ?: 0,
+                cameraRate.describe()
             )
         Log.i(PERFORMANCE_TAG, message)
         diagnosticsRecorder.record(message)
@@ -2740,6 +2836,20 @@ open class MeasurementFrameProcessor(
                 detectionConfidence = detection.confidence.takeIf { it.isFinite() }
             )
         }
+        if (observation != null &&
+            observation.rulerValid &&
+            observation.positionTicks != null &&
+            observation.source == com.cupet.fallingball.vision.BallDetectionSource.TINY_HEATMAP
+        ) {
+            synchronized(causalFallbackLock) {
+                val last = causalFallbackObservations.lastOrNull()
+                if (last?.timestampNs == observation.timestampNs) {
+                    causalFallbackObservations[causalFallbackObservations.lastIndex] = observation
+                } else {
+                    causalFallbackObservations.add(observation)
+                }
+            }
+        }
         val gateBefore = fallTrackingGate.status()
         val update = fallTrackingGate.observe(observation, timestampNs)
         lightweightTrackingDiagnostics?.recordGate(fallTrackingGate.status().lastRejection)
@@ -2826,6 +2936,7 @@ open class MeasurementFrameProcessor(
             if (!offline) awaitTemporalWorkerDrain()
             finalizationTimer.recordSince(TinyPipelineStage.WORKER_DRAIN, drainStartedNs)
             applyFinalTinyHeatmapDecode(active, finalizationTimer)
+            applyCausalSustainedFallbackIfNeeded(active, finalizationTimer)
         }
         val velocityStartedNs = finalizationTimer.start()
         val newlyFinished = active.finish(reason)
@@ -3016,12 +3127,16 @@ open class MeasurementFrameProcessor(
         val decodedBackwardTravelPx = FinalDecodeAcceptance.backwardTravelPx(
             finalSamples.map { it.axialPx }
         )
+        val decodedMaxBackwardStepTicks = FinalDecodeAcceptance.maxBackwardStepTicks(
+            finalSamples.map { it.positionTicks }
+        )
         val decodedFallConfirmed = FinalDecodeAcceptance.confirmsFall(finalObservations)
         val accepted = FinalDecodeAcceptance.acceptsDecode(
                 causalTravelPx,
                 decodedTravelPx,
                 decodedFallConfirmed,
-                decodedBackwardTravelPx
+                decodedBackwardTravelPx,
+                decodedMaxBackwardStepTicks
             )
         stageTimer.recordSince(TinyPipelineStage.FINAL_ACCEPTANCE, acceptanceStartedNs)
         if (!accepted) {
@@ -3041,6 +3156,91 @@ open class MeasurementFrameProcessor(
             "Final TinyHeatmapNet Viterbi decoded frames=${records.size} " +
                 "present=${finalSamples.size} velocity=${result.expectedVerticalVelocity}"
         )
+    }
+
+    /**
+     * Last deterministic fallback before [FallSession.finish].
+     *
+     * The strict gate and the whole-sequence decode can both reject a slow, clean causal
+     * selection: the gate needs at least 0.05 ruler ticks between consecutive frames and the
+     * Viterbi decode can win with a static reflection. The selector buffer contains every
+     * selected TinyHeatmap observation, so a robust whole-sequence fit can recover those
+     * runs without loosening the live gate for fast balls or no-ball controls.
+     */
+    private fun applyCausalSustainedFallbackIfNeeded(
+        active: FallSession,
+        stageTimer: TinyPipelineStageTimer
+    ) {
+        val startedNs = stageTimer.start()
+        try {
+            val currentAnalysis = VelocityEstimator.analyze(active.samples)
+            val currentReliable = VelocityEstimator.isReliableTerminalEstimate(
+                currentAnalysis.summary.plateauFound,
+                currentAnalysis.summary.terminalVelocityMmPerS,
+                currentAnalysis.summary.validSampleCount,
+                currentAnalysis.quality
+            )
+            if (currentReliable) return
+
+            val observations = synchronized(causalFallbackLock) {
+                causalFallbackObservations.toList()
+            }
+            val selected = FinalDecodeAcceptance.selectSustainedFall(observations) ?: return
+            val fallbackSamples = samplesFromCausalFallback(
+                selected,
+                active.config.tickSpacingMm
+            )
+            if (fallbackSamples.size < 2) return
+
+            val fallbackAnalysis = VelocityEstimator.analyze(fallbackSamples)
+            val fallbackReliable = VelocityEstimator.isReliableTerminalEstimate(
+                fallbackAnalysis.summary.plateauFound,
+                fallbackAnalysis.summary.terminalVelocityMmPerS,
+                fallbackAnalysis.summary.validSampleCount,
+                fallbackAnalysis.quality
+            )
+            if (!fallbackReliable ||
+                fallbackAnalysis.summary.terminalVelocityMmPerS == null ||
+                fallbackSamples.zipWithNext().any { (a, b) -> b.tNs <= a.tNs }
+            ) {
+                return
+            }
+            active.replaceSamplesForFinalDecode(fallbackSamples)
+            Log.i(
+                TAG,
+                "Causal sustained fallback replaced samples count=${fallbackSamples.size} " +
+                    "velocity=${fallbackAnalysis.summary.terminalVelocityMmPerS}"
+            )
+        } finally {
+            stageTimer.recordSince(TinyPipelineStage.FINAL_ACCEPTANCE, startedNs)
+        }
+    }
+
+    private fun samplesFromCausalFallback(
+        observations: List<FallFrameObservation>,
+        tickSpacingMm: Float
+    ): List<BallSample> {
+        if (observations.isEmpty()) return emptyList()
+        val reference = observations.first().positionTicks?.toInt() ?: return emptyList()
+        return observations.map { observation ->
+            val relativeTicks = observation.positionTicks?.minus(reference)
+            BallSample(
+                tNs = observation.timestampNs,
+                axialPx = observation.axialPx,
+                positionMm = relativeTicks?.times(tickSpacingMm),
+                rulerValid = observation.rulerValid,
+                extrapolated = false,
+                shiftPx = observation.shiftPx,
+                positionTicks = relativeTicks,
+                lateralPx = observation.lateralPx,
+                lateralMm = observation.lateralMm,
+                normalizedLateral = observation.normalizedLateral,
+                wallClearanceMm = observation.wallClearanceMm,
+                wallContactState = observation.wallContactState,
+                detectionSource = observation.source,
+                detectionConfidence = observation.detectionConfidence
+            )
+        }
     }
 
     /**

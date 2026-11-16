@@ -102,72 +102,60 @@
             android:layout_height="wrap_content"
             android:layout_marginBottom="4dp" />
 
-        <!-- Row 1: the measurement itself -->
+        <!--
+          One action row: the measurement itself keeps the accent fill and absorbs the leftover
+          width; the four camera actions follow as compact outlined buttons. They used to be two
+          rows (measurement + parameters, then relock + video + history), which cost ~69dp of
+          preview on every screen.
+        -->
         <LinearLayout
-            android:id="@+id/measureRow"
+            android:id="@+id/actionRow"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:baselineAligned="false"
             android:gravity="center_vertical"
             android:orientation="horizontal">
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnTrack"
+                style="@style/Widget.FallingBallTube.ActionButton.Primary"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:layout_marginEnd="6dp"
+                android:layout_marginEnd="4dp"
                 android:layout_weight="1"
-                android:text="@string/btn_start_track"
-                android:textColor="@color/camera_on_accent"
-                app:backgroundTint="@color/camera_accent" />
+                android:text="@string/btn_start_track" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnConfig"
-                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                style="@style/Widget.FallingBallTube.ActionButton"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="@string/btn_config"
-                android:textColor="@color/camera_text_primary"
-                app:strokeColor="@color/camera_secondary" />
-        </LinearLayout>
+                android:layout_marginEnd="4dp"
+                android:text="@string/btn_config" />
 
-        <!-- Row 2: relock stays fixed at left; history occupies the second action slot. -->
-        <LinearLayout
-            android:id="@+id/cameraRow"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:gravity="center_vertical"
-            android:orientation="horizontal">
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnRelock"
+                style="@style/Widget.FallingBallTube.ActionButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="4dp"
+                android:text="@string/btn_relock" />
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnRelock"
-            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginEnd="6dp"
-            android:layout_weight="1"
-            android:text="@string/btn_relock"
-            android:textColor="@color/camera_text_primary"
-            app:strokeColor="@color/camera_accent" />
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnVideoAnalysis"
+                style="@style/Widget.FallingBallTube.ActionButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="4dp"
+                android:text="@string/btn_video_analysis" />
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnVideoAnalysis"
-            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginEnd="6dp"
-            android:text="@string/btn_video_analysis"
-            android:textColor="@color/camera_text_primary"
-            app:strokeColor="@color/camera_secondary" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnHistory"
-            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="@string/btn_history"
-            android:textColor="@color/camera_text_primary"
-            app:strokeColor="@color/camera_secondary" />
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnHistory"
+                style="@style/Widget.FallingBallTube.ActionButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/btn_history" />
         </LinearLayout>
 
     </LinearLayout>

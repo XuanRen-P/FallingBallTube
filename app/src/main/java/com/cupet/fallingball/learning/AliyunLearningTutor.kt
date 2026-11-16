@@ -43,6 +43,7 @@ class AliyunLearningTutor(
     private val turnTimeoutMs: Long = TURN_TIMEOUT_MS,
     private val questionTimeoutMs: Long = QUESTION_TIMEOUT_MS,
     private val summaryGateway: ResponsesGateway? = null,
+    private val questionGateway: ResponsesGateway = gateway,
     private val backgroundScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 ) : LearningTutor {
     private val toolExecutor = LearningToolExecutor(knowledgeIndex)
@@ -50,6 +51,8 @@ class AliyunLearningTutor(
     private val sessionMeasurements = ConcurrentHashMap<String, String>()
     private val stopRequested = AtomicBoolean(false)
     private val generationMutex = Mutex()
+    /** Question drafting is background work and must never block a student turn. */
+    private val questionMutex = Mutex()
     private val summaryMutex = Mutex()
     private val summaryJobs = ConcurrentHashMap<String, Job>()
     private val titleJobs = ConcurrentHashMap<String, Job>()
@@ -57,7 +60,7 @@ class AliyunLearningTutor(
     override suspend fun prepareQuestions(
         record: MeasurementRecord,
         chartPngBase64: String?
-    ): PreparedQuestions = generationMutex.withLock {
+    ): PreparedQuestions = questionMutex.withLock {
         val snapshot = LearningMeasurementSnapshot.fromRecord(record)
         store.loadQuestions(record.id, snapshot.fingerprint)?.let { return@withLock it }
         val questions = generateQuestions(snapshot, chartPngBase64)
@@ -154,7 +157,14 @@ class AliyunLearningTutor(
             it.role == LearningMessageRole.ASSISTANT &&
                 it.state == LearningMessageState.COMPLETE
         }
-        val turnContract = SocraticPrompt.turnContract(firstTutorTurn)
+        // Evidence already carried by the developer context is not re-fetched through a tool.
+        val readEvidenceSections = priorEvidenceSections(titledOriginal) +
+            LearningContextBuilder.prefilledEvidenceSections(titledOriginal.snapshot)
+        var pendingEvidenceSection = MeasurementEvidencePolicy.requiredSection(
+            userText,
+            readEvidenceSections
+        )
+        val turnContract = SocraticPrompt.turnContract(firstTutorTurn, pendingEvidenceSection)
         val budget = ToolTurnBudget()
         val reasoning = StringBuilder()
         val text = StringBuilder()
@@ -162,13 +172,8 @@ class AliyunLearningTutor(
         var lastPersistedLength = 0
         var allowWebTools = false
         var allowKnowledgeSearchTool = !knowledgeIndex.hasSufficientCoverage(userText)
-        var mustReadMeasurementEvidence = MeasurementEvidencePolicy.mustReadMeasurementEvidence(
-            userText,
-            firstTutorTurn,
-            priorEvidenceSections(titledOriginal)
-        )
-        var allowMeasurementEvidenceTool = mustReadMeasurementEvidence
-        var forcedEvidenceAttempts = 0
+        var allowMeasurementEvidenceTool =
+            MeasurementEvidencePolicy.hasUnreadSections(readEvidenceSections)
         var forceToolFreeCompletion = false
         try {
             withTimeout(turnTimeoutMs) {
@@ -179,10 +184,9 @@ class AliyunLearningTutor(
                     throwIfStopRequested()
                     val toolCalls = ArrayList<FunctionCall>()
                     var repeatedReadOnlyCall = false
-                    val suppressTextUntilEvidence = mustReadMeasurementEvidence
                     val tools = when {
                         budget.exhausted || forceToolFreeCompletion -> JSONArray()
-                        mustReadMeasurementEvidence -> measurementEvidenceTools()
+                        pendingEvidenceSection != null -> measurementEvidenceTools()
                         else -> tools(
                             allowWebTools,
                             allowMeasurementEvidenceTool,
@@ -191,10 +195,8 @@ class AliyunLearningTutor(
                     }
                     val toolChoice: Any = when {
                         budget.exhausted || forceToolFreeCompletion -> "none"
-                        // qwen3.7-plus rejects required/object tool_choice in thinking mode.
-                        // Only the evidence tool is exposed here, and text remains suppressed
-                        // until it is called or the bounded local fallback executes it.
-                        mustReadMeasurementEvidence -> "auto"
+                        // qwen3.7-plus rejects required/object tool_choice in thinking mode; the
+                        // turn contract already asks for the missing evidence section first.
                         else -> "auto"
                     }
                     val body = responseBody(
@@ -211,9 +213,7 @@ class AliyunLearningTutor(
                                 reasoning.append(event.delta)
                                 emit(LearningEvent.ReasoningDelta(event.delta))
                             }
-                            is AliyunStreamEvent.TextDelta -> if (
-                                event.delta.isNotEmpty() && !suppressTextUntilEvidence
-                            ) {
+                            is AliyunStreamEvent.TextDelta -> if (event.delta.isNotEmpty()) {
                                 text.append(event.delta)
                                 emit(LearningEvent.TextDelta(event.delta))
                                 if (text.length - lastPersistedLength >= STREAM_PERSIST_CHARS) {
@@ -258,21 +258,6 @@ class AliyunLearningTutor(
                         }
                     }
                     throwIfStopRequested()
-                    if (toolCalls.isEmpty() && mustReadMeasurementEvidence) {
-                        forcedEvidenceAttempts += 1
-                        if (forcedEvidenceAttempts < MAX_FORCED_EVIDENCE_ATTEMPTS) {
-                            input.put(JSONObject().put("role", "developer").put(
-                                "content",
-                                "你没有执行被强制指定的测量证据函数。不得输出文字；现在必须调用 get_measurement_evidence。"
-                            ))
-                            continue
-                        }
-                        toolCalls += FunctionCall(
-                            name = LearningToolExecutor.GET_MEASUREMENT_EVIDENCE,
-                            arguments = "{\"section\":\"OVERVIEW\"}",
-                            callId = "local-evidence-$turnId"
-                        )
-                    }
                     if (toolCalls.isEmpty()) break
                     for (call in toolCalls) {
                         throwIfStopRequested()
@@ -288,7 +273,7 @@ class AliyunLearningTutor(
                             )
                             repeatedReadOnlyCall = true
                             if (call.name == LearningToolExecutor.GET_MEASUREMENT_EVIDENCE) {
-                                mustReadMeasurementEvidence = false
+                                pendingEvidenceSection = null
                                 allowMeasurementEvidenceTool = false
                             }
                             continue
@@ -342,8 +327,12 @@ class AliyunLearningTutor(
                             }.getOrDefault(false)
                         }
                         if (call.name == LearningToolExecutor.GET_MEASUREMENT_EVIDENCE) {
-                            mustReadMeasurementEvidence = false
+                            pendingEvidenceSection = null
                             allowMeasurementEvidenceTool = false
+                            input.put(JSONObject().put("role", "developer").put(
+                                "content",
+                                "本轮所需的测量证据已在上一步取得，请直接完成本轮回答，不要重复读取同一 section。"
+                            ))
                         }
                     }
                     if (repeatedReadOnlyCall) {
@@ -393,22 +382,32 @@ class AliyunLearningTutor(
             throw cancelled
         } catch (error: IOException) {
             val stopped = stopRequested.get()
+            val reason = if (stopped) "" else error.userMessage()
+            if (!stopped) LearningLog.warn("turn failed: ${error.javaClass.simpleName}", error)
             session = session.withAssistantText(
                 assistantId,
                 text.toString(),
                 reasoning.toString(),
                 if (stopped) LearningMessageState.STOPPED else LearningMessageState.ERROR,
-                clock()
+                clock(),
+                reason
             )
             store.saveSession(session)
             if (stopped) emit(LearningEvent.Stopped(session))
-            else emit(LearningEvent.Error(error.userMessage(), recoverable = true))
+            else emit(LearningEvent.Error(reason, recoverable = true))
         } catch (error: Exception) {
+            LearningLog.warn("turn failed unexpectedly", error)
+            val reason = error.message?.takeIf(String::isNotBlank) ?: "生成失败"
             session = session.withAssistantText(
-                assistantId, text.toString(), reasoning.toString(), LearningMessageState.ERROR, clock()
+                assistantId,
+                text.toString(),
+                reasoning.toString(),
+                LearningMessageState.ERROR,
+                clock(),
+                reason
             )
             store.saveSession(session)
-            emit(LearningEvent.Error(error.message ?: "生成失败", recoverable = false))
+            emit(LearningEvent.Error(reason, recoverable = false))
         }
         }
     }
@@ -498,7 +497,7 @@ class AliyunLearningTutor(
             .put(JSONObject().put("role", "user").put("content", content))
         var result: List<String>? = null
         withTimeout(questionTimeoutMs) {
-            gateway.stream(responseBody(
+            questionGateway.stream(responseBody(
                 input = input,
                 reasoningEffort = "medium",
                 tools = JSONArray().put(questionTool),
@@ -896,12 +895,14 @@ class AliyunLearningTutor(
         value: String,
         reasoning: String,
         state: LearningMessageState,
-        now: Long
+        now: Long,
+        failureReason: String = ""
     ) = copy(
         messages = messages.map { message ->
             if (message.id == assistantId) message.copy(
                 text = value,
                 reasoning = reasoning,
+                failureReason = failureReason,
                 state = state
             ) else message
         },
@@ -933,7 +934,8 @@ class AliyunLearningTutor(
             in 500..599 -> "模型服务暂时不可用，请稍后重试"
             else -> when (this) {
                 is AliyunTimeoutException -> "模型请求超时，请重试"
-                is AliyunResponseException -> "模型服务拒绝了请求：${message.orEmpty().take(180)}"
+                is AliyunResponseException -> message.orEmpty().take(180)
+                    .ifBlank { "模型未能完成本次回答" }
                 else -> "网络连接中断，请检查网络后重试"
             }
         }
@@ -958,7 +960,6 @@ class AliyunLearningTutor(
         const val ANSWER_MAX_OUTPUT_TOKENS = 4_096
         const val QUESTION_MAX_OUTPUT_TOKENS = 1_200
         const val STREAM_PERSIST_CHARS = 80
-        const val MAX_FORCED_EVIDENCE_ATTEMPTS = 2
         const val QUESTION_FUNCTION = "submit_learning_questions"
         const val SUMMARY_FUNCTION = "submit_learning_summary"
         const val SUMMARY_MAX_OUTPUT_TOKENS = 1_600
@@ -971,5 +972,17 @@ class AliyunLearningTutor(
             LearningToolExecutor.GET_MEASUREMENT_EVIDENCE,
             LearningToolExecutor.SEARCH_COURSE_KNOWLEDGE
         )
+    }
+}
+
+/**
+ * Thin logcat wrapper. Failures raised while streaming a model answer used to disappear into a
+ * transient toast, so every aborted turn now leaves one line under a stable tag.
+ */
+internal object LearningLog {
+    private const val TAG = "LearningTutor"
+
+    fun warn(message: String, error: Throwable? = null) {
+        runCatching { android.util.Log.w(TAG, message, error) }
     }
 }

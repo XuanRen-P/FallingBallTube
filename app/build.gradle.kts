@@ -40,6 +40,23 @@ val qnnRuntimeSdkPaths = listOf(
     "lib/hexagon-v75/unsigned/libQnnHtpV75.so",
     "lib/hexagon-v75/unsigned/libQnnHtpV75Skel.so"
 )
+// Additional Hexagon arches are optional: libQnnHtp.so loads the stub matching the device's
+// HTP arch at runtime, so a v73 device needs the v73 pair and a v75 device ignores it.
+// Each arch adds roughly 25 MB, so absence keeps the APK v75-only instead of failing.
+val optionalQnnArchPaths = listOf(
+    "lib/aarch64-android/libQnnHtpV73Stub.so",
+    "lib/aarch64-android/libQnnHtpV73CalculatorStub.so",
+    "lib/hexagon-v73/unsigned/libQnnHtpV73.so",
+    "lib/hexagon-v73/unsigned/libQnnHtpV73Skel.so",
+    "lib/aarch64-android/libQnnHtpV69Stub.so",
+    "lib/aarch64-android/libQnnHtpV69CalculatorStub.so",
+    "lib/hexagon-v69/unsigned/libQnnHtpV69.so",
+    "lib/hexagon-v69/unsigned/libQnnHtpV69Skel.so",
+    "lib/aarch64-android/libQnnHtpV79Stub.so",
+    "lib/aarch64-android/libQnnHtpV79CalculatorStub.so",
+    "lib/hexagon-v79/unsigned/libQnnHtpV79.so",
+    "lib/hexagon-v79/unsigned/libQnnHtpV79Skel.so"
+)
 val qnnSdkRoot = providers.environmentVariable("QNN_SDK_ROOT")
     .map { it.trim() }
     .orElse("")
@@ -68,7 +85,15 @@ val nativeRuntimeFiles = qnnSdkRoot.map { sdkRoot ->
                 "Restore app/src/main/jniLibs/arm64-v8a/libncnn.so from the repository."
         )
     }
-    qnnFiles + ncnnFile
+    val extraQnnFiles = optionalQnnArchPaths.mapNotNull { relativePath ->
+        val candidate = if (sdkRoot.isEmpty()) {
+            localNativeRuntimeDir.resolve(relativePath.substringAfterLast('/'))
+        } else {
+            File(sdkRoot, relativePath)
+        }
+        candidate.takeIf { it.isFile }
+    }
+    qnnFiles + extraQnnFiles + ncnnFile
 }
 val localQnnSdkDir = file("src/main/cpp/third_party/qnn")
 val qnnNoticeFiles = qnnSdkRoot.map { sdkRoot ->
